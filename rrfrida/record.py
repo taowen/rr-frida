@@ -108,6 +108,9 @@ def record(args: argparse.Namespace) -> dict:
     if writer.install_error:
         raise RecorderError(writer.install_error)
 
+    # Enable recording only once the host is receiving messages. Attaching and
+    # installing can happen while the module is already executing calls.
+    script.exports_sync.beginobservation()
     time.sleep(args.duration)
     summary = script.exports_sync.finishobservation()
     if writer.error:

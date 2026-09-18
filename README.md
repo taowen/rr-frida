@@ -23,6 +23,23 @@ and its ordered child calls. Replay runs *your* implementation with the recorded
 arguments and compares observable business state. Your code does not have to
 share the original's layout, calling convention, or object model.
 
+## What the tutorial covers
+
+[`tutorial/README.md`](tutorial/README.md) is a three-case investigation, not a
+feature tour:
+
+- **Case A** — a leaf function whose result differs in the last bit. Value
+  comparison catches it, if the input can expose it.
+- **Case B** — a parent function with private helpers you cannot call. Its three
+  code paths are distinguishable only by their **ordered child calls**, so the
+  method has to compare a call contract, normalize pointers to identities, and
+  provide the dependencies as checked shims.
+- **Case C** — the lock and global state the recording holds but deliberately
+  does not compare, and why that judgement is the hardest part of the method.
+
+Every step runs on a real device. A deliberately injected control-flow bug is
+caught, then fixed.
+
 ## Install
 
 Python 3.10+ and the `frida` Python package for recording. Replay needs a C++

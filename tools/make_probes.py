@@ -102,14 +102,31 @@ def parse_function_specs(specs: list[str]) -> dict[str, int]:
 
 
 def parse_snapshot_specs(specs: list[str]) -> dict[str, list[dict]]:
-    """--snapshot name=phase:source:size [optional]"""
+    """Parse --snapshot name=phase:source:size[:optional].
+
+    A source of ``register:<reg>`` emits a register snapshot instead of a
+    memory snapshot; register snapshots take their width from the register and
+    must not carry a size.
+
+        --snapshot "f=enter:arg0:8"
+        --snapshot "f=leave:register:s0"
+    """
     result: dict[str, list[dict]] = {}
     for spec in specs or []:
         function, _, rest = spec.partition("=")
-        phase, _, rest = rest.partition(":")
-        source, _, rest = rest.partition(":")
-        size, _, flags = rest.partition(":")
-        if not (function and phase and source and size.isdigit()):
+        phase, _, remainder = rest.partition(":")
+        if not (function and phase in ("enter", "leave", "instruction")):
+            raise SystemExit(f"--snapshot expects name=phase:source:size, got {spec!r}")
+        if remainder.startswith("register:"):
+            # register:<name>; the width comes from the register itself.
+            register = remainder[len("register:"):]
+            if not register:
+                raise SystemExit(f"register snapshot needs a register name: {spec!r}")
+            result.setdefault(function, []).append({"phase": phase, "register": register})
+            continue
+        source, _, tail = remainder.partition(":")
+        size, _, flags = tail.partition(":")
+        if not (source and size.isdigit()):
             raise SystemExit(f"--snapshot expects name=phase:source:size, got {spec!r}")
         result.setdefault(function, []).append({
             "phase": phase,

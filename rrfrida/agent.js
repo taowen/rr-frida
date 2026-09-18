@@ -36,7 +36,11 @@ let eventCount = 0;
 let dropCount = 0;
 let correlation = 0n;
 let batchSequence = 0;
-let acceptingEntries = true;
+// Recording starts disabled and is enabled by the recorder over RPC. The agent
+// attaches as soon as the module is present, which can be before the host is
+// ready to receive batches; recording during that window loses the first
+// enter records and leaves orphaned leaves in the file.
+let acceptingEntries = false;
 
 const clockGettime = new NativeFunction(
     Module.getExportByName('libc.so', 'clock_gettime'), 'int', ['int', 'pointer']);
@@ -203,7 +207,19 @@ function captureSnapshots(definition, phase, args, context, invocation) {
   let flags = 0;
   for (let index = 0; index < selected.length; index++) {
     const snapshot = selected[index];
-    const size = snapshot.size ?? 0;
+    let size = snapshot.size ?? 0;
+    // A dynamic snapshot reads `args[size_arg] * multiplier` bytes, capped at
+    // `max`. This is how a pointer argument with a runtime length is captured
+    // without knowing the length in advance.
+    if (snapshot.size_arg !== undefined) {
+      if (args === null) throw new Error('dynamic snapshot needs call arguments');
+      const count = args[snapshot.size_arg].toUInt32();
+      const multiplier = snapshot.multiplier ?? 1;
+      size = Math.min(snapshot.max ?? count * multiplier, count * multiplier);
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw new Error('invalid dynamic snapshot size');
+      }
+    }
     try {
       if (snapshot.register !== undefined) {
         const value = context[snapshot.register];
@@ -404,6 +420,13 @@ function install(module) {
 }
 
 rpc.exports = {
+  beginobservation() {
+    // Start recording. Called by the recorder after script.load() returns, so
+    // no event is produced before the host can receive it.
+    counters; // ensure defined
+    acceptingEntries = true;
+    return status();
+  },
   flush() {
     flushAllBatches();
     return status();

@@ -1,0 +1,108 @@
+{
+  "pipeline_process": {
+    "kind": 300,
+    "type": "function",
+    "rva": "0x49cc",
+    "expected": "ff4305d1e923106d",
+    "snapshots": [
+      {
+        "phase": "enter",
+        "register": "x0"
+      },
+      {
+        "phase": "enter",
+        "register": "x1"
+      },
+      {
+        "phase": "enter",
+        "source": "arg1",
+        "size_arg": 2,
+        "multiplier": 4,
+        "max": 256,
+        "optional": true
+      },
+      {
+        "phase": "enter",
+        "register": "x2"
+      },
+      {
+        "phase": "enter",
+        "register": "x3"
+      },
+      {
+        "phase": "leave",
+        "source": "arg3",
+        "size": 16,
+        "optional": true
+      },
+      {
+        "phase": "leave",
+        "register": "x0"
+      }
+    ]
+  },
+  "pipeline_apply_gain": {
+    "kind": 310,
+    "type": "function",
+    "rva": "0x4810",
+    "expected": "3f0400712b030054",
+    "snapshots": [
+      {
+        "phase": "enter",
+        "register": "x0"
+      },
+      {
+        "phase": "enter",
+        "register": "x1"
+      },
+      {
+        "phase": "enter",
+        "register": "s0"
+      }
+    ]
+  },
+  "pipeline_normalize": {
+    "kind": 320,
+    "type": "function",
+    "rva": "0x487c",
+    "expected": "00e4002f3f040071",
+    "snapshots": [
+      {
+        "phase": "enter",
+        "register": "x0"
+      },
+      {
+        "phase": "enter",
+        "register": "x1"
+      },
+      {
+        "phase": "leave",
+        "register": "s0"
+      }
+    ]
+  },
+  "pipeline_summarize": {
+    "kind": 330,
+    "type": "function",
+    "rva": "0x4918",
+    "expected": "3f040071eb000054",
+    "snapshots": [
+      {
+        "phase": "enter",
+        "register": "x0"
+      },
+      {
+        "phase": "enter",
+        "register": "x1"
+      },
+      {
+        "phase": "enter",
+        "register": "s0"
+      },
+      {
+        "phase": "enter",
+        "register": "x3"
+      }
+    ]
+  }
+}

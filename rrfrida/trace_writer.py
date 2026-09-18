@@ -91,9 +91,35 @@ class TraceWriter:
 
     def finish(self, path: Path, metadata: dict) -> dict:
         """Write the file and return a manifest for the caller."""
+        unbalanced = self._unbalanced_correlations()
+        if unbalanced:
+            raise WriteError(
+                f"{unbalanced} leave record(s) have no matching enter; "
+                "the first batch was lost or a probe hooked a mid-call address")
         metadata_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
         padding = (-len(metadata_bytes)) % 8
         header = FILE_HEADER.pack(FILE_MAGIC, FILE_HEADER.size, 1, 0, 0, 0, 0, 0,
                                   len(metadata_bytes), 0, 0, 0, 0, b"\0" * 8)
         Path(path).write_bytes(header + metadata_bytes + b"\0" * padding + bytes(self._events))
         return {"records": self._records, "bytes": len(self._events)}
+
+    def _unbalanced_correlations(self) -> int:
+        """Count leave records whose enter is absent from the captured stream.
+
+        An enter and its leave always share a correlation id. If a leave has no
+        enter, an event was lost between the agent and this writer; the file
+        would parse as a call forest with holes, so it must not be written.
+        """
+        seen: set[int] = set()
+        unbalanced = 0
+        offset = 0
+        while offset + EVENT_HEADER_SIZE <= len(self._events):
+            (total_size, _header, _kind, phase, _flags, _payload,
+             _tid, _seq, _ts, correlation, _reserved) = EVENT_HEADER.unpack_from(
+                self._events, offset)
+            if phase == 1:
+                seen.add(correlation)
+            elif phase == 2 and correlation not in seen:
+                unbalanced += 1
+            offset += total_size
+        return unbalanced

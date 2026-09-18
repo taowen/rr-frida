@@ -4,5 +4,11 @@
     "probes_dir": "probes",
     "compare": "tutorial/compare_geom.py",
     "duration": 2
+  },
+  "pipeline": {
+    "probe_set": "tutorial/example/pipeline-probe-set.json",
+    "probes_dir": "probes",
+    "compare": "tutorial/compare_pipeline.py",
+    "duration": 2
   }
 }

@@ -1,253 +1,404 @@
-# Tutorial: prove a reimplementation matches the original
+# The reimplementation that passed every test and was still wrong
 
-This tutorial builds a small native library, records its behaviour from a
-running process on an Android device, and then checks a from-scratch
-reimplementation against that recording **byte for byte** — catching a one-ULP
-floating-point difference that a normal test would miss.
+You are given a stripped Android `.so`. One function in it, `pipeline_process`,
+is the entry point your product calls. You have to rewrite it in your own C++.
 
-The example is deliberately tiny. The point is the pipeline, not the functions.
+You cannot call the library. You cannot link it. You have the decompiled body and
+three helper functions it calls, all private. Your job is a new implementation
+that behaves identically.
 
----
+You write it. It compiles. It returns the right numbers on every input you try.
 
-## The problem this solves
+And it is wrong.
 
-You rewrote a function from a stripped `.so`. It compiles. It produces results
-that look right. How do you know it is right?
+This tutorial is the hunt for that bug, and for the two smaller ones hidden
+backstage. You will build a recording of the original, replay it against your
+code, and watch it produce the first differing byte. Then you will fix it. Then
+you will discover the class of bug the first method *cannot* catch, and build the
+instrument that can.
 
-"Looks right" fails here, because the failure mode is a last-bit difference:
-
-```
-official: dir = 0.26726123690605164, 0.5345224738121033, 0.8017836809158325
-mine:     dir = 0.26726123690605164, 0.5345224738121033, 0.8017837405204773
-                                                                      ^ one ULP
-```
-
-The cause in this example is that the official code computes a length in
-`float` while the reimplementation used `double`. Both are "correct" math; only
-one matches the original. Tests that compare with a tolerance will never notice,
-and the difference compounds downstream.
-
-The fix is not a better assertion. It is a **recording of what the original
-actually did**, replayed against your code.
+Everything here runs on a real device. Nothing is a thought experiment.
 
 ---
 
-## Why this works without ABI compatibility
+## Cast of characters
 
-The reimplementation is ordinary C++. It does not share the official memory
-layout, calling convention, or object model. That is fine, because the recording
-stores a **contract**, not an execution:
+| Piece | What it is |
+| --- | --- |
+| `libgeom.so` | The original library. Two leaf functions, for warm-up. |
+| `libpipeline.so` | The original library with the parent function and its three private helpers. |
+| `driver.cpp` | A process that calls the library in a loop, so a recorder has something to watch. |
+| `mine.cpp` | Your reimplementation of the leaf functions. |
+| `pipeline_mine.cpp` | Your reimplementation of the parent. |
+| `probes/*.json` | Declarations of *what to watch*: which functions, which arguments, which memory. |
+| `rr-frida` | The recorder, the replayer, and the comparators. |
 
-- which function was called, on which thread
-- the argument values and the return value
-- selected memory regions before and after
-- the ordered child calls
-
-Replay runs *your* function with the recorded arguments and compares the
-observable result. Two implementations agree when their business-visible state
-agrees — regardless of how they are built inside.
-
-Comparison happens on **normalized** state: absolute addresses are mapped to
-object identities, and allocator/runtime internals are excluded. For this
-tutorial every value is a float, so no normalization is needed.
+The rule that makes all of this possible: **a recording stores a contract, not an
+execution**. It records what was called and what the world looked like, not the
+instructions. So the thing you record from does not need to resemble the thing
+you replay into.
 
 ---
 
-## Layout
+# Case A: the last bit that nobody sees
 
-```
-tutorial/
-  example/
-    geom.h            the interface
-    official.cpp      the original, built into libgeom.so
-    mine.cpp          your reimplementation
-    driver.cpp        an Android process that calls the library in a loop
-    probe-set.json    which module to attach to, pinned by sha256
-  replay_geom.cpp     reads the recording's inputs, calls mine.cpp
-  compare_geom.py     validate -> encode -> replay -> compare
-probes/
-  geom.json           where the functions are and what to snapshot
-```
+## The setup
 
----
-
-## Step 1 — build the official library and a driver
-
-The recording needs a live process that calls the library. Build the library as
-a **shared object** (so Frida can find it by module name) and a small driver that
-links it:
+Build the first library, a driver that calls it, and the recording probes:
 
 ```bash
-NDK=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/windows-x86_64/bin
-$NDK/clang++ --target=aarch64-linux-android29 -O2 -shared -fPIC \
-    tutorial/example/official.cpp -o build/libgeom.so
-$NDK/clang++ --target=aarch64-linux-android29 -O2 -static-libstdc++ \
-    -Wl,-rpath,/data/local/tmp -Lbuild -lgeom \
-    tutorial/example/driver.cpp -o build/geom-driver
-```
-
-`driver.cpp` loops forever calling both functions with fixed inputs. It prints a
-line every 100000 iterations and otherwise sleeps, so the call rate stays low
-enough for the recorder.
-
-> The inputs are chosen so the bug is observable. `geom_direction(1,2,3)` is a
-> case where `float` and `double` lengths round differently. If you changed it
-> to `(1,2,2)` the two implementations would agree and the tutorial would not
-> demonstrate anything. Choosing an input that exercises the difference is part
-> of the job — the recording can only prove what it covers.
-
-## Step 2 — generate the probe declarations
-
-Hand-writing RVAs and instruction bytes is error prone, so derive them from the
-library you just built:
-
-```bash
-python3 tools/make_probes.py build/libgeom.so \
-    --nm "$NDK/llvm-nm.exe" \
-    --function geom_scale:100 --function geom_direction:200 \
-    --snapshot "geom_scale=enter:arg0:8" ... \
+pwsh -File tools/build-example.ps1          # builds libgeom.so and geom-driver
+python3 tools/make_probes.py build/libgeom.so --nm "$NDK/llvm-nm.exe" ... \
     --output probes/geom.json
 ```
 
-The committed `probes/geom.json` is the result, with one correction a human had
-to make. `make_probes.py` cannot know which arguments are pointers, so it
-initially produced snapshots that dereferenced the *float* arguments — which
-crashed the agent. The corrected file uses **register snapshots** for floats:
+`geom_direction(float x, float y, float z, float* out)` normalizes a vector. Your
+`mine.cpp` does the same thing, except it computes the length in `double` and
+narrows at the end. The original computes it in `float`.
 
-```json
-"geom_scale": {
-  "kind": 100, "rva": "0x45f8", "expected": "02102e1e0208011f",
-  "snapshots": [
-    { "phase": "enter", "register": "s0" },
-    { "phase": "enter", "register": "s1" },
-    { "phase": "enter", "source": "arg0", "size": 8 },
-    { "phase": "leave", "register": "s0" },
-    { "phase": "leave", "source": "arg0", "size": 8 }
-  ]
-}
-```
+You try it on `(1, 2, 2)`. Your output matches. You try a few more. They match.
+You ship.
 
-Two rules this exposes, both learned the hard way:
+## The evidence
 
-- **`s0`..`s3` are not `arg0`..`arg3`.** AArch64 passes floats in the S registers
-  and integers/pointers in the X registers. Frida's `args[]` array is the X
-  bank. `geom_scale(float a, float b, float* out)` has `out` in `arg0`, not
-  `arg2`. Reading `arg2` dereferences leftover integer garbage and crashes.
-- **Frida reports an S register by value, not by bit pattern.** `s0` for `2.0f`
-  comes back as the number `2`. The agent re-encodes FP registers as IEEE-754
-  bits (`registerBytes` in `agent.js`) so the snapshot is comparable.
-
-`expected` pins the first eight bytes at the entry. The agent refuses to attach
-if they do not match, so a recording can never silently come from another build.
-
-## Step 3 — pin the module identity
+Record the original from a running process on the device:
 
 ```bash
-python3 -c "import hashlib,json,pathlib; \
-  print(hashlib.sha256(pathlib.Path('build/libgeom.so').read_bytes()).hexdigest())"
-```
-
-Put the hash in `tutorial/example/probe-set.json`. Pin exactly one of `sha256`
-or `build_id`. A library with no GNU Build ID note must use `sha256`.
-
-## Step 4 — record on the device
-
-```bash
-adb push build/libgeom.so build/geom-driver /data/local/tmp/
-adb shell chmod 755 /data/local/tmp/geom-driver
-adb shell "nohup /data/local/tmp/geom-driver >/dev/null 2>&1 &"
-
-python3 -m rrfrida.record \
-    --serial <serial> --process geom-driver \
+python3 -m rrfrida.record --serial <serial> --process geom-driver \
     --probe-set tutorial/example/probe-set.json --probes-dir probes \
     --duration 2 --output build/demo.bin
 ```
 
-Requirements:
-
-- A `frida-server` on the device whose version matches the local `frida`
-  package. On Android it must run as root.
-- The driver must still be alive when the recorder attaches.
-
-The recorder verifies module identity and instruction bytes, attaches, observes
-for the duration, flushes, and writes the trace. It fails if the agent dropped
-any events.
-
-## Step 5 — look at what was recorded
+Replay your code against the recording:
 
 ```bash
-python3 -m rrfrida.inspect build/demo.bin --snapshots --limit 1
+python3 tutorial/compare_geom.py build/demo.bin --serial <serial> --compiler "$NDK/clang++.exe"
 ```
-
-```json
-{
-  "kind": 100, "phase": "complete",
-  "args": ["0x7fc1cd17b8", "0x7fc1cd1780", "0x37", "0xffffffffffffffff"],
-  "retval": "0x7fc1cd17b8",
-  "enter_snapshots": [
-    { "source": "s0",   "hex": "0000004000000000" },
-    { "source": "s1",   "hex": "0000404000000000" },
-    { "source": "arg0", "hex": "0000e040000080bf" }
-  ]
-}
-```
-
-- `s0` = `0x40000000` = `2.0f`, `s1` = `0x40400000` = `3.0f` — the arguments.
-- `arg0` = `7.0f, -1.0f` — `out[0] = 2*3+1`, `out[1] = 2-3`. The pointer is
-  `arg0` because the floats took the S registers.
-
-Note the `args` array itself holds stale integer registers. That is exactly the
-trap: the useful data is in the named snapshots, not in `args`.
-
-## Step 6 — compare your reimplementation
-
-```bash
-python3 tutorial/compare_geom.py build/demo.bin \
-    --serial <serial> --compiler "$NDK/clang++.exe"
-```
-
-With the buggy `mine.cpp` (double-precision length) this fails with **the first
-differing byte**:
 
 ```
 rrtrace.format.TraceError: direction[0] byte 8: actual 0xb3 != official 0xb2
 ```
 
-After fixing the length to `float`, the same recording passes:
+**One byte. The last byte of the third output component.** The original produced
+`0x3f4d...b2`, you produced `0x3f4d...b3`. One unit in the last place.
 
-```json
-{ "result": "PASS", "cases": 64, "bytes": 768,
-  "scope": "geom_scale and geom_direction with the recorded argument values; ..." }
-```
+## What just happened
 
-`compare_geom.py` performs four steps in order, and the order matters:
+Your test inputs never exercised the difference. `(1, 2, 2)` happens to round the
+same in `float` and `double`. The recording used `(1, 2, 3)`, which does not. You
+did not choose that input — the original's driver did, and the recording carried
+it forward.
 
-1. **Validate** the recording against the official evidence — probe set, module
-   identity, call shape, argument ABI, snapshot sizes. This layer is never
-   relaxed to make an implementation pass.
-2. **Encode** the validated inputs into the replay program's stdin.
-3. **Replay** — compile `replay_geom.cpp` plus `mine.cpp`, run on the device.
-4. **Compare** the reimplementation's stdout to the recorded result, bit by bit.
+This is the whole argument for the method, in one byte: **a recording is evidence
+of what the original actually did, including the cases your intuition skipped.**
+
+Fix the length to `float` and the same recording passes. Nothing about the
+recording changed; only your code did.
+
+> You can reproduce the counterexample on the host, without a device:
+> `tutorial/README.md` notes `(1,2,3)` is a case where `float` and `double`
+> lengths differ. Choosing an input that *can* expose the difference is part of
+> the job. A recording proves what it covers.
 
 ---
 
-## What the recording does and does not prove
+# Case B: the bug that is not in the numbers
 
-The recording covers **one fixed input** per function, repeated. It proves that
-your reimplementation matches the official one *for those inputs*. It does not
-prove equivalence for inputs the driver never used.
+Case A is comfortable. Values go in, values come out, you compare them. Real
+targets are not so kind.
 
-That is why the adapter prints a `scope` field, and why the input choice is
-documented next to the driver. When you extend the driver to vary its inputs,
-you get more coverage from the same pipeline. The recording is the asset: add
-cases, re-record, and every future reimplementation is checked against them.
+`pipeline_process` takes a config flag and calls three private helpers. The
+helpers have different signatures, the parent takes a lock, and it writes into a
+caller-owned buffer, not a return value. And here is the part that breaks the
+value-comparison approach: **you cannot call the helpers**. They are not exported.
+On the real target you would not even have their names.
+
+So your reimplementation has to provide its own helpers. Which means the question
+is no longer "did the numbers match". It is:
+
+> Did my parent call the same helpers, in the same order, with the same
+> arguments?
+
+## Watch what the recording sees
+
+Record the parent. The recorder hooks the parent *and* the three helpers, so the
+trace carries the whole call tree. Look at it:
+
+```bash
+python3 -m rrfrida.inspect build/pipeline.bin --limit 6 --snapshots
+```
+
+Decoded, the parent's children come out as three distinct sequences:
+
+```
+config 0 -> [apply_gain, summarize]                    (2 children)
+config 1 -> [apply_gain, normalize, summarize]         (3 children)
+config 2 -> [apply_gain, normalize, apply_gain, summarize]   (4 children)
+```
+
+**The paths are distinguishable by their call sequence alone**, before any value
+comparison. Config 2 applies gain, normalizes, then applies gain again. Config 1
+normalizes after the first gain. Config 0 never normalizes.
+
+That sequence is the contract.
+
+## The instrument
+
+The reimplementation calls helpers through declarations the replay provides:
+
+```cpp
+namespace tutorial_helpers {
+void apply_gain(float* values, int count, float gain);
+float normalize(float* values, int count);
+int summarize(const float* values, int count, float scale, float* out);
+}
+```
+
+The replay defines these as **shims**. Each shim checks itself against the
+recorded contract before doing any arithmetic:
+
+```cpp
+void apply_gain(float* values, int count, float gain) {
+    contract_child(310, 3, {identity_of(values), count, 0});
+    for (int i = 0; i < count; ++i) values[i] *= gain;
+}
+```
+
+`contract_child` verifies, against the next recorded child:
+
+1. the **kind** (which helper),
+2. the **arity** (how many arguments),
+3. each **argument**, and
+4. that the parent does not call more children than the recording has.
+
+Then it returns the recorded result, so the shim's arithmetic is yours while the
+*interaction* is the original's.
+
+## The pointer problem, and why identity is not address
+
+The first run of this produces a strange failure:
+
+```
+pipeline replay: child 1 arg 0: actual 1 != recorded 0
+```
+
+Argument zero is the buffer pointer. In the official run it was one address; in
+your run it is another. **Comparing addresses across processes is meaningless.**
+Every run places the heap and stack somewhere else.
+
+So arguments that are pointers are recorded as **identity tokens**:
+
+| Token | Buffer |
+| --- | --- |
+| 1 | the parent's private working copy |
+| 2 | the caller's output buffer |
+| 3 | the caller's input buffer |
+
+The adapter derives these from the recording (input is `arg1`, output is `arg3`,
+and the working copy is whatever the parent hands to its first child). The replay
+derives the same three from its own run. Now the comparison is about *role*, not
+address, and it is stable.
+
+> This is the part that surprises people. Normalization is not a detail you add at
+> the end; it is what makes the comparison possible at all. The same idea scales
+> to object graphs: every pointer becomes an identity, and the recorded graph
+> becomes a shape your implementation must reproduce.
+
+## The hunt
+
+Now inject the bug. On config 2, apply the gain **before** normalizing:
+
+```cpp
+// wrong order
+apply_gain(work, count, 2.0f);
+const float peak = normalize(work, count);
+```
+
+Run the comparison:
+
+```
+pipeline replay: child call identity or arity differs from the recording
+```
+
+Caught. Not by a value — the outputs might even coincide — but by the **order of
+the calls**. Config 2 was supposed to be `[gain, normalize, gain, summarize]`, and
+your version produced `[gain, gain, normalize, summarize]`.
+
+That is the class of bug Case A's method cannot see. And it is the reason this
+project exists.
+
+## Put it back
+
+Restore the correct order and the same recording passes:
+
+```json
+{ "result": "PASS", "cases": 12, ... }
+```
+
+Twelve cases across three config paths, each checked for returned count, output
+values, and the ordered child contract with arguments. On AArch64.
+
+---
+
+# Case C: the things the recording deliberately does not compare
+
+Look closely at the `scope` field every PASS prints:
+
+```
+"scope": "pipeline_process parent control flow, ordered child calls with
+ arguments, returned count and the 4 output floats, for the three recorded
+ config paths; the lock and the global state object are not compared"
+```
+
+The recording **contains** the lock and the global state. The adapter still does
+not compare them. That is not an oversight; it is the hardest judgement in the
+whole method.
+
+The parent takes `pthread_mutex_lock`. The recording captured that call and the
+mutex's held/not-held state before and after. But a mutex is a **live platform
+object**. Its bytes differ run to run, and copying them across processes produces
+nonsense. So:
+
+- The lock is **really acquired and released** during replay, not synthesized.
+- What is compared is the **ownership state** — was the lock held at this
+  boundary, yes or no — never the mutex's internal bytes.
+- The global state object is identified by role, like the buffers, never by
+  address.
+
+The line between "compare this" and "exclude this" cannot be drawn by a rule. It
+is drawn by asking, for each field, *does this byte carry business meaning, or
+platform implementation?* Allocator bookkeeping, reference counts, pthread
+internals, and absolute addresses are implementation. Buffer contents, call
+order, lock ownership, and returned values are business.
+
+Get it wrong in one direction and the check is useless — it passes everything.
+Get it wrong the other way and it fails forever on bytes that can never match.
+Every adapter in a real project ends up with a `scope` string like the one above,
+because that string is the honest answer to "what did this actually prove?"
+
+---
+
+# What you have built
+
+By the end you have a pipeline that:
+
+1. **records** a contract from a running native library with Frida,
+2. **validates** the recording against the official evidence before trusting it,
+3. **replays** your C++ on the actual device,
+4. **compares** values, memory, call order, and lock ownership, and
+5. **states its scope**, so a PASS cannot be mistaken for more than it is.
+
+It never needed ABI compatibility, a shared header, or access to the original
+source. It needed evidence of what the original did, and a way to make your run
+speak the same language.
+
+---
+
+# The rules, stated once
+
+- **The recording is the oracle.** Not the disassembly, not the docs, not your
+  intuition. If it is not in the recording, you cannot claim it.
+- **Pointers become identities.** An address is not evidence; a role is.
+- **Compare business state, exclude platform state.** And write down which is
+  which, every time.
+- **A PASS has a scope.** The scope is part of the result, not a footnote.
+- **Choose inputs that can fail.** A recording of cases that cannot distinguish
+  two implementations proves nothing about them.
+
+---
+
+# Running it yourself
+
+Requirements: Python with the `frida` package matching the device's
+`frida-server`, an Android device with root and a running `frida-server`, and the
+NDK toolchain.
+
+```bash
+# 1. Build the originals and a driver
+pwsh -File tools/build-example.ps1
+
+# 2. Push and run the driver
+adb push build/libgeom.so build/geom-driver /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/geom-driver
+adb shell "nohup /data/local/tmp/geom-driver >/dev/null 2>&1 &"
+
+# 3. Record, inspect, compare
+python3 -m rrfrida.record --serial <serial> --process geom-driver \
+    --probe-set tutorial/example/probe-set.json --probes-dir probes \
+    --duration 2 --output build/demo.bin
+python3 -m rrfrida.inspect build/demo.bin --snapshots --limit 1
+python3 tutorial/compare_geom.py build/demo.bin --serial <serial> --compiler "$NDK/clang++.exe"
+```
+
+The full step-by-step, including the probe-declaration traps that cost real time
+(float arguments live in the S registers, not `args[]`; integer arguments are not
+pointers), is in the sections below.
+
+---
+
+# Appendix: the operational details
+
+## Registers are not arguments
+
+AArch64 passes floating-point arguments in `s0..s3` and integers/pointers in
+`x0..x7`. Frida's `args[]` array is the **X bank only**. Two consequences that
+crash a recorder if you forget them:
+
+- `geom_scale(float a, float b, float* out)` has `out` in **`arg0`**, not `arg2`.
+  Reading `arg2` dereferences leftover integer garbage.
+- A float argument must be captured as a **register snapshot**, not a memory
+  snapshot. `{ "phase": "enter", "register": "s0" }`, not `{ "source": "arg0" }`.
+
+And Frida reports an S register **by value**: `s0` for `2.0f` comes back as the
+number `2`, not the bit pattern `0x40000000`. The agent re-encodes FP registers
+as IEEE-754 bits so snapshots are byte-comparable.
+
+## A pointer and the data at that pointer are two captures
+
+`{ "source": "arg1", "size": 8 }` reads eight bytes **at** the address in
+`arg1`. To record the address itself, use `{ "register": "x1" }`. Confusing the
+two is how the first pointer comparison returned a packed pair of floats instead
+of an address.
+
+For a buffer whose length is an argument, use a dynamic snapshot:
+
+```json
+{ "phase": "enter", "source": "arg1", "size_arg": 2, "multiplier": 4, "max": 256 }
+```
+
+That reads `arg2 * 4` bytes at `arg1`, capped at 256. Dynamic snapshots must be
+captured on enter, where the arguments are known.
+
+## Optional captures
+
+A probe can ask for a pointer that is null on some path. Mark the snapshot
+`optional` and a failed capture records null instead of aborting the agent:
+
+```json
+{ "phase": "leave", "source": "arg3", "size": 16, "optional": true }
+```
+
+The reader then reports `captured: false` for that field, and the adapter decides
+whether that is acceptable. It never treats a zero-filled failed read as observed
+memory.
+
+## The recorder is not recording until you say so
+
+The agent attaches as soon as the module is present, which can be before the host
+is receiving messages. Recording starts disabled and is enabled over RPC after
+`script.load()` returns. Without that handshake the first batch is lost and the
+file contains leaves with no matching enters. The writer refuses to produce such
+a file.
 
 ## Common failures
 
 | Symptom | Cause |
 | --- | --- |
-| `unable to connect to remote frida-server` | No `frida-server` running, or a version mismatch with the local client |
-| `installation mismatch at 0x...` | Probes point at a different build; regenerate with `make_probes.py` |
-| Agent `access violation` on `captureSnapshots` | A snapshot dereferenced a non-pointer argument (see the float/register note) |
-| `leave without matching enter` | The process exited mid-observation, or a probe hooked the wrong address |
-| First diff in an output field | The reimplementation differs; that is the tool working |
+| `unable to connect to remote frida-server` | No `frida-server`, or client/server version mismatch |
+| `instruction mismatch at 0x...` | Probes point at another build; regenerate with `make_probes.py` |
+| Agent `access violation` on a snapshot | A snapshot dereferenced a non-pointer (float or integer argument) |
+| `unknown register w0` | Frida exposes `x0`, not `w0`; mask to 32 bits in the adapter |
+| `leave without matching enter` | The first batch was lost, or a probe hooked a mid-call address |
+| `child call identity or arity differs` | Your parent's control flow diverges from the original |
+| `child call argument differs` | Same calls, different arguments, or an un-normalized pointer |
+| First diff in an output field | Your arithmetic differs; the tool is working |

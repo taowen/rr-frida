@@ -152,7 +152,8 @@ def _validate_snapshot(probe: str, snapshot: dict) -> None:
     _require(snapshot.get("phase") in SNAPSHOT_PHASES,
              f"probe {probe} snapshot phase invalid")
     # A register snapshot names the register and takes its width from it. Any
-    # other snapshot names a memory source and needs an explicit byte size.
+    # other snapshot names a memory source and needs an explicit byte size, or
+    # a dynamic size derived from an argument.
     if "register" in snapshot:
         _require(isinstance(snapshot["register"], str) and snapshot["register"],
                  f"probe {probe} snapshot register must be a non-empty string")
@@ -161,5 +162,15 @@ def _validate_snapshot(probe: str, snapshot: dict) -> None:
         return
     _require(isinstance(snapshot.get("source"), str),
              f"probe {probe} snapshot source must be a string")
+    if "size_arg" in snapshot:
+        _require(isinstance(snapshot["size_arg"], int) and snapshot["size_arg"] >= 0,
+                 f"probe {probe} size_arg must be a non-negative int")
+        _require(isinstance(snapshot.get("max"), int) and snapshot["max"] > 0,
+                 f"probe {probe} dynamic snapshot needs a positive max")
+        _require("size" not in snapshot,
+                 f"probe {probe} dynamic snapshot must not also set size")
+        _require(snapshot["phase"] == "enter",
+                 f"probe {probe} dynamic snapshot must be captured on enter")
+        return
     _require(isinstance(snapshot.get("size"), int) and snapshot["size"] >= 0,
              f"probe {probe} snapshot size must be a non-negative int")

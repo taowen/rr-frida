@@ -209,11 +209,16 @@ def expect_children(trace: Trace, call: Call, kinds: list[int]) -> list[Call]:
     return children
 
 
-def snapshot_parts(event: Event, definitions: list[dict]) -> list[tuple[dict, bytes | None]]:
+def snapshot_parts(event: Event, definitions: list[dict],
+                   enter: Event | None = None) -> list[tuple[dict, bytes | None]]:
     """Decode an event's snapshot using the probe definitions from its metadata.
 
     Returns (definition, bytes) pairs. `None` marks a failed optional capture;
     zero-filled failed reads must never be interpreted as observed memory.
+
+    A snapshot with ``size_arg`` has a size that depends on a call argument.
+    Pass the matching ``enter`` event so the size can be resolved; without it,
+    a dynamic snapshot cannot be decoded.
     """
     phase = PHASES[event.phase]
     selected = [d for d in definitions if d["phase"] == phase]
@@ -222,9 +227,19 @@ def snapshot_parts(event: Event, definitions: list[dict]) -> list[tuple[dict, by
     result: list[tuple[dict, bytes | None]] = []
     cursor = 0
     for index, definition in enumerate(selected):
-        # A register snapshot is always eight bytes (one u64) and needs no size
-        # or source field; a memory snapshot declares its own size.
-        size = 8 if "register" in definition else definition.get("size", 0)
+        if "register" in definition:
+            size = 8
+        elif "size_arg" in definition:
+            require(enter is not None,
+                    "dynamic snapshot needs the call's enter event to resolve its size")
+            index_arg = definition["size_arg"]
+            require(index_arg < len(enter.registers),
+                    f"size_arg {index_arg} is outside the recorded argument registers")
+            count = enter.registers[index_arg] & 0xFFFFFFFF
+            size = min(definition.get("max", count * definition.get("multiplier", 1)),
+                       count * definition.get("multiplier", 1))
+        else:
+            size = definition.get("size", 0)
         require(isinstance(size, int) and size >= 0, "invalid snapshot size")
         require(cursor + size <= len(event.snapshot), "snapshot descriptor overruns payload")
         raw = event.snapshot[cursor:cursor + size]
@@ -233,3 +248,5 @@ def snapshot_parts(event: Event, definitions: list[dict]) -> list[tuple[dict, by
         result.append((definition, raw if valid else None))
         cursor += size
     return result
+
+
