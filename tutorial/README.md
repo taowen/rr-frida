@@ -11,13 +11,12 @@ You write it. It compiles. It returns the right numbers on every input you try.
 
 And it is wrong.
 
-This tutorial is the hunt for that bug, and for the two smaller ones hidden
-backstage. You will build a recording of the original, replay it against your
-code, and watch it produce the first differing byte. Then you will fix it. Then
-you will discover the class of bug the first method *cannot* catch, and build the
-instrument that can.
+This tutorial is the hunt for that bug, and for the three more waiting behind it.
+Each time you build a method that catches one class of failure, a harder class
+walks past it. By the end you have a recorder, a replayer, and — the part that
+actually matters — a way of knowing what your evidence *covers*.
 
-Everything here runs on a real device. Nothing is a thought experiment.
+Everything runs on a real device. Nothing is a thought experiment.
 
 ---
 
@@ -27,16 +26,15 @@ Everything here runs on a real device. Nothing is a thought experiment.
 | --- | --- |
 | `libgeom.so` | The original library. Two leaf functions, for warm-up. |
 | `libpipeline.so` | The original library with the parent function and its three private helpers. |
-| `driver.cpp` | A process that calls the library in a loop, so a recorder has something to watch. |
-| `mine.cpp` | Your reimplementation of the leaf functions. |
-| `pipeline_mine.cpp` | Your reimplementation of the parent. |
+| `driver.cpp` | A process that calls the library in a loop, so a passive recorder has something to watch. |
+| `fixtures/fixture_geom.js` | A fixture that calls the original directly, with inputs it chooses. |
+| `mine.cpp`, `pipeline_mine.cpp` | Your reimplementations. |
 | `probes/*.json` | Declarations of *what to watch*: which functions, which arguments, which memory. |
 | `rr-frida` | The recorder, the replayer, and the comparators. |
 
-The rule that makes all of this possible: **a recording stores a contract, not an
-execution**. It records what was called and what the world looked like, not the
-instructions. So the thing you record from does not need to resemble the thing
-you replay into.
+The rule under everything: **a recording stores a contract, not an execution.**
+It records what was called and what the world looked like, not the instructions.
+Neither side needs to resemble the other.
 
 ---
 
@@ -44,34 +42,26 @@ you replay into.
 
 ## The setup
 
-Build the first library, a driver that calls it, and the recording probes:
-
 ```bash
-pwsh -File tools/build-example.ps1          # builds libgeom.so and geom-driver
+pwsh -File tools/build-example.ps1
 python3 tools/make_probes.py build/libgeom.so --nm "$NDK/llvm-nm.exe" ... \
     --output probes/geom.json
 ```
 
 `geom_direction(float x, float y, float z, float* out)` normalizes a vector. Your
-`mine.cpp` does the same thing, except it computes the length in `double` and
-narrows at the end. The original computes it in `float`.
+version computes the length in `double` and narrows at the end. The original
+computes it in `float`.
 
-You try it on `(1, 2, 2)`. Your output matches. You try a few more. They match.
-You ship.
+You try `(1, 2, 2)`. It matches. A few more. They match. You ship.
 
 ## The evidence
 
-Record the original from a running process on the device:
+Record the original while a driver calls it:
 
 ```bash
 python3 -m rrfrida.record --serial <serial> --process geom-driver \
     --probe-set tutorial/example/probe-set.json --probes-dir probes \
     --duration 2 --output build/demo.bin
-```
-
-Replay your code against the recording:
-
-```bash
 python3 tutorial/compare_geom.py build/demo.bin --serial <serial> --compiler "$NDK/clang++.exe"
 ```
 
@@ -79,82 +69,156 @@ python3 tutorial/compare_geom.py build/demo.bin --serial <serial> --compiler "$N
 rrtrace.format.TraceError: direction[0] byte 8: actual 0xb3 != official 0xb2
 ```
 
-**One byte. The last byte of the third output component.** The original produced
-`0x3f4d...b2`, you produced `0x3f4d...b3`. One unit in the last place.
+**One byte. The last byte of the third component.** One unit in the last place,
+from a `float`/`double` rounding difference your inputs never exercised.
 
-## What just happened
-
-Your test inputs never exercised the difference. `(1, 2, 2)` happens to round the
-same in `float` and `double`. The recording used `(1, 2, 3)`, which does not. You
-did not choose that input — the original's driver did, and the recording carried
-it forward.
-
-This is the whole argument for the method, in one byte: **a recording is evidence
-of what the original actually did, including the cases your intuition skipped.**
-
-Fix the length to `float` and the same recording passes. Nothing about the
-recording changed; only your code did.
-
-> You can reproduce the counterexample on the host, without a device:
-> `tutorial/README.md` notes `(1,2,3)` is a case where `float` and `double`
-> lengths differ. Choosing an input that *can* expose the difference is part of
-> the job. A recording proves what it covers.
+This is the argument for the method in one byte: **a recording is evidence of
+what the original actually did, including the cases your intuition skipped.**
 
 ---
 
-# Case B: the bug that is not in the numbers
+# Case B: the input you did not think to try
 
-Case A is comfortable. Values go in, values come out, you compare them. Real
-targets are not so kind.
+## The uncomfortable question
+
+Case A caught the bug because the driver happened to use `(1, 2, 3)`. If it had
+used only `(1, 2, 2)`, the recording would have blessed your broken code.
+
+You did not choose those inputs. The driver did. That is a passive recording: it
+records whatever the process happens to do, and you inherit both its coverage and
+its blind spots.
+
+So the real question is not "did the recording catch it". It is:
+
+> What if the case I care about never happens on its own?
+
+## Take control
+
+A **fixture** calls the original directly. It allocates its own objects, calls
+the entry through a `NativeFunction` with inputs it writes, and reads the results
+out. Instead of hoping the process exercises a case, the fixture *asks*.
+
+`tutorial/example/fixture_geom.js`:
+
+```js
+const direction = new NativeFunction(module.base.add(0x4610), 'void',
+                                     ['float', 'float', 'float', 'pointer']);
+const directionCases = [
+  [1.0, 2.0, 3.0],        // float and double lengths differ here
+  [1.0, 2.0, 2.0],        // ...and here they agree
+  [-1.0, -2.0, -3.0],
+  [1.0e-4, 2.0e-4, 3.0e-4],
+];
+for (const [x, y, z] of directionCases) {
+  direction(x, y, z, output);
+  results.push({kind: 'direction', input: [x, y, z], output: [...]});
+}
+```
+
+Run it:
+
+```bash
+python3 -m rrfrida.fixture --serial <serial> --process geom-driver \
+    --probe-set tutorial/example/probe-set.json --probes-dir probes \
+    --fixture tutorial/example/fixture_geom.js --output build/fixture.bin
+```
+
+**14 records.** Seven cases, two events each (enter and leave). No driver, no
+waiting, no luck.
+
+## The mechanism
+
+Two pieces make this safe:
+
+**The agent binds the fixture's memory and confines recording to its thread.**
+
+```js
+bindfixturememory(binding) {
+  if (fixtureMemory !== null) throw new Error('fixture memory already bound');
+  for (const [name, region] of Object.entries(binding.regions)) {
+    ptr(region.address).readByteArray(region.size);   // prove readable
+  }
+  fixtureMemory = binding;
+}
+```
+
+The fixture reports the regions it allocated; the agent validates them as
+readable and records only calls made from the fixture's thread. Without that
+confinement a running process would mix its own activity into your recording.
+
+**The fixture's answer is a claim, not evidence.** `run()` returns an object
+with the results it read. That object goes into the trace as `fixture_result` —
+and then the adapter checks it against the captured calls:
+
+```python
+def validate_fixture_claims(trace) -> int:
+    for index, call in enumerate([*directions, *scales]):
+        claim = results[index]
+        out = _floats_at(call, "leave", "arg0", 3)
+        require(list(claim["output"]) == list(out),
+                f"fixture claim {index} disagrees with the captured output")
+```
+
+**Seven claims verified.** If the fixture had misread memory, or a probe had
+captured something else, this check fails and the recording is rejected. A
+fixture is trustworthy only because its claims are re-derived from the trace.
+
+## The payoff
+
+With the correct implementation, `compare_fixture.py` passes:
+
+```json
+{ "result": "PASS", "fixture_claims_checked": 7, "bytes": 84 }
+```
+
+Now break it. Put the `double` length back:
+
+```
+rrtrace.format.TraceError: byte 44: actual 0xb3 != official 0xb2
+```
+
+Caught — because the fixture *chose* `(1, 2, 3)`. The passive recording in Case A
+only caught it by luck. The fixture catches it by design.
+
+> The lesson is not "fixtures are better". It is that **you must own the input
+> selection**. A recording proves what it covers; if you did not choose what it
+> covers, you do not know.
+
+---
+
+# Case C: the bug that is not in the numbers
+
+Values are comfortable. Real targets are not.
 
 `pipeline_process` takes a config flag and calls three private helpers. The
 helpers have different signatures, the parent takes a lock, and it writes into a
-caller-owned buffer, not a return value. And here is the part that breaks the
-value-comparison approach: **you cannot call the helpers**. They are not exported.
-On the real target you would not even have their names.
+caller-owned buffer. And you cannot call the helpers: on the real target they are
+not even exported.
 
-So your reimplementation has to provide its own helpers. Which means the question
-is no longer "did the numbers match". It is:
+So your reimplementation provides its own. The question becomes:
 
 > Did my parent call the same helpers, in the same order, with the same
 > arguments?
 
-## Watch what the recording sees
+## Watch the call tree
 
-Record the parent. The recorder hooks the parent *and* the three helpers, so the
-trace carries the whole call tree. Look at it:
-
-```bash
-python3 -m rrfrida.inspect build/pipeline.bin --limit 6 --snapshots
-```
-
-Decoded, the parent's children come out as three distinct sequences:
+The recorder hooks the parent *and* the three helpers, so the trace carries the
+whole tree. Decoded, the parent's children come out as three distinct sequences:
 
 ```
-config 0 -> [apply_gain, summarize]                    (2 children)
-config 1 -> [apply_gain, normalize, summarize]         (3 children)
-config 2 -> [apply_gain, normalize, apply_gain, summarize]   (4 children)
+config 0 -> [apply_gain, summarize]                        (2 children)
+config 1 -> [apply_gain, normalize, summarize]             (3 children)
+config 2 -> [apply_gain, normalize, apply_gain, summarize] (4 children)
 ```
 
 **The paths are distinguishable by their call sequence alone**, before any value
-comparison. Config 2 applies gain, normalizes, then applies gain again. Config 1
-normalizes after the first gain. Config 0 never normalizes.
+comparison. Config 2 applies gain, normalizes, then gains again.
 
 That sequence is the contract.
 
 ## The instrument
 
-The reimplementation calls helpers through declarations the replay provides:
-
-```cpp
-namespace tutorial_helpers {
-void apply_gain(float* values, int count, float gain);
-float normalize(float* values, int count);
-int summarize(const float* values, int count, float scale, float* out);
-}
-```
-
-The replay defines these as **shims**. Each shim checks itself against the
+The replay provides the helpers as **shims**. Each checks itself against the
 recorded contract before doing any arithmetic:
 
 ```cpp
@@ -164,29 +228,22 @@ void apply_gain(float* values, int count, float gain) {
 }
 ```
 
-`contract_child` verifies, against the next recorded child:
+`contract_child` verifies the kind, the arity, each argument, and that the parent
+does not call more children than the recording has. Then it returns the recorded
+result — so the arithmetic is yours, the *interaction* is the original's.
 
-1. the **kind** (which helper),
-2. the **arity** (how many arguments),
-3. each **argument**, and
-4. that the parent does not call more children than the recording has.
+## The pointer problem
 
-Then it returns the recorded result, so the shim's arithmetic is yours while the
-*interaction* is the original's.
-
-## The pointer problem, and why identity is not address
-
-The first run of this produces a strange failure:
+The first run fails strangely:
 
 ```
 pipeline replay: child 1 arg 0: actual 1 != recorded 0
 ```
 
-Argument zero is the buffer pointer. In the official run it was one address; in
-your run it is another. **Comparing addresses across processes is meaningless.**
-Every run places the heap and stack somewhere else.
+Argument zero is a buffer pointer. The official run had one address; yours has
+another. **Comparing addresses across processes is meaningless.**
 
-So arguments that are pointers are recorded as **identity tokens**:
+So pointers are recorded as **identity tokens**:
 
 | Token | Buffer |
 | --- | --- |
@@ -194,103 +251,117 @@ So arguments that are pointers are recorded as **identity tokens**:
 | 2 | the caller's output buffer |
 | 3 | the caller's input buffer |
 
-The adapter derives these from the recording (input is `arg1`, output is `arg3`,
-and the working copy is whatever the parent hands to its first child). The replay
-derives the same three from its own run. Now the comparison is about *role*, not
-address, and it is stable.
+The adapter derives these from the recording. The replay derives the same three
+from its own run. Now the comparison is about *role*, not address.
 
-> This is the part that surprises people. Normalization is not a detail you add at
-> the end; it is what makes the comparison possible at all. The same idea scales
-> to object graphs: every pointer becomes an identity, and the recorded graph
-> becomes a shape your implementation must reproduce.
+> This is the part that surprises people. Normalization is not a detail added at
+> the end; it is what makes the comparison possible. Every pointer becomes an
+> identity, and the recorded graph becomes a shape your implementation must
+> reproduce.
 
 ## The hunt
 
-Now inject the bug. On config 2, apply the gain **before** normalizing:
-
-```cpp
-// wrong order
-apply_gain(work, count, 2.0f);
-const float peak = normalize(work, count);
-```
-
-Run the comparison:
+Inject the bug: on config 2, apply the gain **before** normalizing.
 
 ```
 pipeline replay: child call identity or arity differs from the recording
 ```
 
-Caught. Not by a value — the outputs might even coincide — but by the **order of
-the calls**. Config 2 was supposed to be `[gain, normalize, gain, summarize]`, and
-your version produced `[gain, gain, normalize, summarize]`.
+Caught — not by a value, but by the **order of the calls**. Config 2 was
+supposed to be `[gain, normalize, gain, summarize]`.
 
-That is the class of bug Case A's method cannot see. And it is the reason this
-project exists.
-
-## Put it back
-
-Restore the correct order and the same recording passes:
-
-```json
-{ "result": "PASS", "cases": 12, ... }
-```
-
-Twelve cases across three config paths, each checked for returned count, output
-values, and the ordered child contract with arguments. On AArch64.
+That is the class of bug Case A and B cannot see. Restore the order and the same
+recording passes twelve cases on AArch64.
 
 ---
 
-# Case C: the things the recording deliberately does not compare
+# Case D: the things the recording deliberately does not compare
 
-Look closely at the `scope` field every PASS prints:
+Every PASS prints a `scope`:
 
 ```
 "scope": "pipeline_process parent control flow, ordered child calls with
- arguments, returned count and the 4 output floats, for the three recorded
- config paths; the lock and the global state object are not compared"
+ arguments, returned count and the 4 output floats...; the lock and the global
+ state object are not compared"
 ```
 
 The recording **contains** the lock and the global state. The adapter still does
-not compare them. That is not an oversight; it is the hardest judgement in the
-whole method.
+not compare them. That is the hardest judgement in the method.
 
-The parent takes `pthread_mutex_lock`. The recording captured that call and the
-mutex's held/not-held state before and after. But a mutex is a **live platform
-object**. Its bytes differ run to run, and copying them across processes produces
-nonsense. So:
+The parent takes `pthread_mutex_lock`. A mutex is a **live platform object**: its
+bytes differ run to run, and copying them across processes is nonsense. So:
 
 - The lock is **really acquired and released** during replay, not synthesized.
-- What is compared is the **ownership state** — was the lock held at this
-  boundary, yes or no — never the mutex's internal bytes.
-- The global state object is identified by role, like the buffers, never by
-  address.
+- What is compared is the **ownership state** — held or not, at this boundary.
+- The global state object is identified by role, like the buffers.
 
 The line between "compare this" and "exclude this" cannot be drawn by a rule. It
 is drawn by asking, for each field, *does this byte carry business meaning, or
 platform implementation?* Allocator bookkeeping, reference counts, pthread
-internals, and absolute addresses are implementation. Buffer contents, call
-order, lock ownership, and returned values are business.
+internals, absolute addresses: implementation. Buffer contents, call order, lock
+ownership, returned values: business.
 
-Get it wrong in one direction and the check is useless — it passes everything.
-Get it wrong the other way and it fails forever on bytes that can never match.
-Every adapter in a real project ends up with a `scope` string like the one above,
-because that string is the honest answer to "what did this actually prove?"
+Get it wrong one way and the check is useless. Wrong the other way and it fails
+forever on bytes that can never match. Every adapter in a real project ends up
+with a `scope` string, because that string is the honest answer to "what did this
+actually prove?"
+
+---
+
+# The part nobody tells you: your recording can be silently broken
+
+Case C's recording worked on the first try. That is suspicious. A recording that
+*lost an event* still parses, still has a call forest, and still produces a PASS —
+for a smaller set of calls than you think.
+
+The recorder refuses to produce such a file. Four checks, each catching a
+different loss:
+
+| Check | What it catches |
+| --- | --- |
+| **Batch sequence continuity** | A batch lost in transit (`1, 2, 4`) |
+| **Per-thread event sequence** | An event dropped inside a batch (`1, 3` on one thread) |
+| **Enter/leave correlation balance** | A leave with no enter — the first batch was lost |
+| **Required-probe counters** | A required probe that never fired, so the file proves nothing about it |
+
+The third one is why the agent does not start recording until the host says so:
+
+```js
+beginobservation() {
+  acceptingEntries = true;   // called after script.load() returns
+  return status();
+}
+```
+
+The agent attaches as soon as the module is present. If it recorded during that
+window, the first enter records would go nowhere and the file would contain
+orphaned leaves. The writer detects that and **refuses to write the file at
+all**:
+
+```python
+unbalanced = self._unbalanced_correlations()
+if unbalanced:
+    raise WriteError(f"{unbalanced} leave record(s) have no matching enter; "
+                     "the first batch was lost...")
+self.validate_sequence()
+```
+
+Why this matters more than it sounds: **a broken recording is worse than no
+recording.** It produces a confident PASS over evidence you do not have. Every
+check above exists because a plausible-looking trace once lied.
 
 ---
 
 # What you have built
 
-By the end you have a pipeline that:
-
-1. **records** a contract from a running native library with Frida,
-2. **validates** the recording against the official evidence before trusting it,
+1. **records** a contract from a running native library, passively or by fixture,
+2. **validates** the recording against the official evidence, and itself,
 3. **replays** your C++ on the actual device,
-4. **compares** values, memory, call order, and lock ownership, and
-5. **states its scope**, so a PASS cannot be mistaken for more than it is.
+4. **compares** values, memory, call order, and lock ownership,
+5. **normalizes** pointers to identities so two runs can be compared at all,
+6. **states its scope**, so a PASS cannot be mistaken for more than it is.
 
-It never needed ABI compatibility, a shared header, or access to the original
-source. It needed evidence of what the original did, and a way to make your run
-speak the same language.
+It never needed ABI compatibility, a shared header, or the original source.
 
 ---
 
@@ -298,45 +369,51 @@ speak the same language.
 
 - **The recording is the oracle.** Not the disassembly, not the docs, not your
   intuition. If it is not in the recording, you cannot claim it.
+- **Own the inputs.** A passive recording inherits its author's blind spots; a
+  fixture chooses what to ask.
+- **A fixture's answer is a claim.** Re-derive it from the trace or discard it.
 - **Pointers become identities.** An address is not evidence; a role is.
-- **Compare business state, exclude platform state.** And write down which is
-  which, every time.
-- **A PASS has a scope.** The scope is part of the result, not a footnote.
-- **Choose inputs that can fail.** A recording of cases that cannot distinguish
-  two implementations proves nothing about them.
+- **Compare business state, exclude platform state.** Write down which is which,
+  every time.
+- **A broken recording is worse than none.** Check sequence, balance, and
+  required-probe counts before you trust a PASS.
 
 ---
 
 # Running it yourself
 
-Requirements: Python with the `frida` package matching the device's
-`frida-server`, an Android device with root and a running `frida-server`, and the
-NDK toolchain.
+Requirements: Python with the `frida` package **matching the device's
+`frida-server`**, an Android device with root and a running `frida-server`, and
+the NDK toolchain.
 
 ```bash
-# 1. Build the originals and a driver
+# 1. Build the originals
 pwsh -File tools/build-example.ps1
 
-# 2. Push and run the driver
+# 2. A driver, for the passive cases
 adb push build/libgeom.so build/geom-driver /data/local/tmp/
 adb shell chmod 755 /data/local/tmp/geom-driver
 adb shell "nohup /data/local/tmp/geom-driver >/dev/null 2>&1 &"
 
-# 3. Record, inspect, compare
+# 3. Passive record, then compare
 python3 -m rrfrida.record --serial <serial> --process geom-driver \
     --probe-set tutorial/example/probe-set.json --probes-dir probes \
     --duration 2 --output build/demo.bin
-python3 -m rrfrida.inspect build/demo.bin --snapshots --limit 1
 python3 tutorial/compare_geom.py build/demo.bin --serial <serial> --compiler "$NDK/clang++.exe"
+
+# 4. Active fixture record, then compare
+python3 -m rrfrida.fixture --serial <serial> --process geom-driver \
+    --probe-set tutorial/example/probe-set.json --probes-dir probes \
+    --fixture tutorial/example/fixture_geom.js --output build/fixture.bin
+python3 tutorial/compare_fixture.py build/fixture.bin --serial <serial> --compiler "$NDK/clang++.exe"
 ```
 
-The full step-by-step, including the probe-declaration traps that cost real time
-(float arguments live in the S registers, not `args[]`; integer arguments are not
-pointers), is in the sections below.
+The parent-contract pipeline case is registered in `cases.json`; run it with
+`python3 -m rrfrida.run pipeline --trace build/pipeline.bin ...`.
 
 ---
 
-# Appendix: the operational details
+# Appendix: the operational details that cost real time
 
 ## Registers are not arguments
 
@@ -346,19 +423,19 @@ crash a recorder if you forget them:
 
 - `geom_scale(float a, float b, float* out)` has `out` in **`arg0`**, not `arg2`.
   Reading `arg2` dereferences leftover integer garbage.
-- A float argument must be captured as a **register snapshot**, not a memory
-  snapshot. `{ "phase": "enter", "register": "s0" }`, not `{ "source": "arg0" }`.
+- A float argument must be a **register snapshot**: `{ "phase": "enter",
+  "register": "s0" }`, not `{ "source": "arg0" }`.
 
-And Frida reports an S register **by value**: `s0` for `2.0f` comes back as the
-number `2`, not the bit pattern `0x40000000`. The agent re-encodes FP registers
-as IEEE-754 bits so snapshots are byte-comparable.
+Frida reports an S register **by value**: `s0` for `2.0f` comes back as the
+number `2`, not `0x40000000`. The agent re-encodes FP registers as IEEE-754 bits
+so snapshots are byte-comparable.
 
 ## A pointer and the data at that pointer are two captures
 
-`{ "source": "arg1", "size": 8 }` reads eight bytes **at** the address in
-`arg1`. To record the address itself, use `{ "register": "x1" }`. Confusing the
-two is how the first pointer comparison returned a packed pair of floats instead
-of an address.
+`{ "source": "arg1", "size": 8 }` reads eight bytes **at** the address in `arg1`.
+To record the address itself, use `{ "register": "x1" }`. Confusing the two is
+how the first pointer comparison returned a packed pair of floats instead of an
+address.
 
 For a buffer whose length is an argument, use a dynamic snapshot:
 
@@ -371,24 +448,15 @@ captured on enter, where the arguments are known.
 
 ## Optional captures
 
-A probe can ask for a pointer that is null on some path. Mark the snapshot
-`optional` and a failed capture records null instead of aborting the agent:
+A probe can ask for a pointer that is null on some path. Mark it `optional` and a
+failed capture records null instead of aborting the agent:
 
 ```json
 { "phase": "leave", "source": "arg3", "size": 16, "optional": true }
 ```
 
-The reader then reports `captured: false` for that field, and the adapter decides
-whether that is acceptable. It never treats a zero-filled failed read as observed
-memory.
-
-## The recorder is not recording until you say so
-
-The agent attaches as soon as the module is present, which can be before the host
-is receiving messages. Recording starts disabled and is enabled over RPC after
-`script.load()` returns. Without that handshake the first batch is lost and the
-file contains leaves with no matching enters. The writer refuses to produce such
-a file.
+The reader reports `captured: false`, and the adapter decides whether that is
+acceptable. A zero-filled failed read is never treated as observed memory.
 
 ## Common failures
 
@@ -399,6 +467,9 @@ a file.
 | Agent `access violation` on a snapshot | A snapshot dereferenced a non-pointer (float or integer argument) |
 | `unknown register w0` | Frida exposes `x0`, not `w0`; mask to 32 bits in the adapter |
 | `leave without matching enter` | The first batch was lost, or a probe hooked a mid-call address |
-| `child call identity or arity differs` | Your parent's control flow diverges from the original |
+| `thread 0x... sequence N, expected M` | An event was dropped inside a batch |
+| `required probe kind N never fired` | The recording proves nothing about that probe |
+| `fixture claim N disagrees` | The fixture misread memory; the trace is the truth |
+| `child call identity or arity differs` | Your parent's control flow diverges |
 | `child call argument differs` | Same calls, different arguments, or an un-normalized pointer |
 | First diff in an output field | Your arithmetic differs; the tool is working |

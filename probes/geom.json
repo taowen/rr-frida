@@ -16,7 +16,8 @@
       {
         "phase": "enter",
         "source": "arg0",
-        "size": 8
+        "size": 8,
+        "optional": true
       },
       {
         "phase": "leave",
@@ -25,7 +26,8 @@
       {
         "phase": "leave",
         "source": "arg0",
-        "size": 8
+        "size": 8,
+        "optional": true
       }
     ]
   },
@@ -50,12 +52,14 @@
       {
         "phase": "enter",
         "source": "arg0",
-        "size": 8
+        "size": 12,
+        "optional": true
       },
       {
         "phase": "leave",
         "source": "arg0",
-        "size": 12
+        "size": 12,
+        "optional": true
       }
     ]
   }

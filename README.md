@@ -25,20 +25,26 @@ share the original's layout, calling convention, or object model.
 
 ## What the tutorial covers
 
-[`tutorial/README.md`](tutorial/README.md) is a three-case investigation, not a
-feature tour:
+[`tutorial/README.md`](tutorial/README.md) is a four-case investigation, not a
+feature tour. Each case builds a method that catches one class of failure, then
+watches a harder class walk past it:
 
 - **Case A** — a leaf function whose result differs in the last bit. Value
   comparison catches it, if the input can expose it.
-- **Case B** — a parent function with private helpers you cannot call. Its three
-  code paths are distinguishable only by their **ordered child calls**, so the
-  method has to compare a call contract, normalize pointers to identities, and
-  provide the dependencies as checked shims.
-- **Case C** — the lock and global state the recording holds but deliberately
-  does not compare, and why that judgement is the hardest part of the method.
+- **Case B** — the input you did not think to try. A passive recording inherits
+  the driver's blind spots, so a **fixture** takes control and calls the original
+  directly with chosen inputs. Its answers are re-checked against the trace.
+- **Case C** — a parent function whose code paths are distinguishable only by
+  their **ordered child calls**. The method has to compare a call contract,
+  normalize pointers to identities, and provide dependencies as checked shims.
+- **Case D** — the lock and global state held but not compared, and why that
+  judgement is the hardest part of the method.
 
-Every step runs on a real device. A deliberately injected control-flow bug is
-caught, then fixed.
+Plus the part that is easy to skip: **a broken recording is worse than no
+recording**, and the four integrity checks that stop one being written.
+
+Every step runs on a real device. Deliberately injected bugs are caught, then
+fixed.
 
 ## Install
 

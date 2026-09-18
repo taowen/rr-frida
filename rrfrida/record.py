@@ -80,6 +80,26 @@ def _find_process(device, name: str) -> int:
     return matches[0].pid
 
 
+def _require_required_probes(probe_set: dict, counts: dict, names: list[str],
+                             probes: dict) -> None:
+    """Fail a recording in which a required probe never fired.
+
+    A probe set marks probes required. If one never fired, the recording says
+    nothing about it, and accepting the file would let a later comparison claim
+    coverage it does not have.
+    """
+    required_kinds = {probes[name]["kind"] for name in probe_set["required"]}
+    for kind in sorted(required_kinds):
+        entry = counts.get(str(kind))
+        if not entry or (entry["enter"] == 0 and entry["hit"] == 0):
+            raise RecorderError(
+                f"required probe kind {kind} never fired; recording proves nothing about it")
+        if entry["enter"] and entry["enter"] != entry["leave"]:
+            raise RecorderError(
+                f"required probe kind {kind} has {entry['enter']} enters but "
+                f"{entry['leave']} leaves")
+
+
 def record(args: argparse.Namespace) -> dict:
     frida = _import_frida()
     probe_set = load_probe_set(args.probe_set)
@@ -129,6 +149,7 @@ def record(args: argparse.Namespace) -> dict:
     manifest = writer.finish(Path(args.output), metadata)
     if summary.get("drop_count"):
         raise RecorderError(f"agent dropped {summary['drop_count']} events; recording invalid")
+    _require_required_probes(probe_set, manifest["probe_counts"], names, probes)
     return {
         "trace": str(args.output),
         "records": manifest["records"],

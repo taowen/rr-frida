@@ -96,12 +96,14 @@ class TraceWriter:
             raise WriteError(
                 f"{unbalanced} leave record(s) have no matching enter; "
                 "the first batch was lost or a probe hooked a mid-call address")
+        self.validate_sequence()
         metadata_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
         padding = (-len(metadata_bytes)) % 8
         header = FILE_HEADER.pack(FILE_MAGIC, FILE_HEADER.size, 1, 0, 0, 0, 0, 0,
                                   len(metadata_bytes), 0, 0, 0, 0, b"\0" * 8)
         Path(path).write_bytes(header + metadata_bytes + b"\0" * padding + bytes(self._events))
-        return {"records": self._records, "bytes": len(self._events)}
+        return {"records": self._records, "bytes": len(self._events),
+                "probe_counts": self.required_probe_summary()}
 
     def _unbalanced_correlations(self) -> int:
         """Count leave records whose enter is absent from the captured stream.
@@ -123,3 +125,47 @@ class TraceWriter:
                 unbalanced += 1
             offset += total_size
         return unbalanced
+
+    def validate_sequence(self) -> None:
+        """Refuse a stream whose per-thread sequence numbers are not contiguous.
+
+        The agent numbers events 1, 2, 3 ... per thread. A gap means an event
+        was lost. Checking it here, before the file exists, turns a silently
+        broken recording into a clear failure.
+        """
+        expected: dict[int, int] = {}
+        offset = 0
+        while offset + EVENT_HEADER_SIZE <= len(self._events):
+            (total_size, _header, _kind, phase, _flags, _payload,
+             tid, sequence, _ts, correlation, _reserved) = EVENT_HEADER.unpack_from(
+                self._events, offset)
+            want = expected.get(tid, 0) + 1
+            if sequence != want:
+                raise WriteError(
+                    f"thread {tid:#x} sequence {sequence}, expected {want}; "
+                    "an event was lost")
+            expected[tid] = sequence
+            offset += total_size
+
+    def required_probe_summary(self) -> dict[str, dict[str, int]]:
+        """Per-kind call counts, for checking that required probes fired.
+
+        A probe set marks probes required. A recording in which a required
+        probe never fired proves nothing about that probe, so the caller must be
+        able to see the counts and reject the file.
+        """
+        counts: dict[int, dict[str, int]] = {}
+        offset = 0
+        while offset + EVENT_HEADER_SIZE <= len(self._events):
+            (total_size, _header, kind, phase, _flags, _payload,
+             _tid, _seq, _ts, _correlation, _reserved) = EVENT_HEADER.unpack_from(
+                self._events, offset)
+            entry = counts.setdefault(kind, {"enter": 0, "leave": 0, "hit": 0})
+            if phase == 1:
+                entry["enter"] += 1
+            elif phase == 2:
+                entry["leave"] += 1
+            elif phase == 3:
+                entry["hit"] += 1
+            offset += total_size
+        return {str(kind): value for kind, value in counts.items()}

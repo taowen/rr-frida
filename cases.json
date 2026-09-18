@@ -10,5 +10,12 @@
     "probes_dir": "probes",
     "compare": "tutorial/compare_pipeline.py",
     "duration": 2
+  },
+  "fixture": {
+    "probe_set": "tutorial/example/probe-set.json",
+    "probes_dir": "probes",
+    "compare": "tutorial/compare_fixture.py",
+    "fixture": "tutorial/example/fixture_geom.js",
+    "kind": "fixture"
   }
 }

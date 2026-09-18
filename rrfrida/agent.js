@@ -41,6 +41,11 @@ let batchSequence = 0;
 // ready to receive batches; recording during that window loses the first
 // enter records and leaves orphaned leaves in the file.
 let acceptingEntries = false;
+// Memory regions allocated by a fixture. When bound, only calls on the fixture
+// thread that touch these regions are recorded, which makes a recording
+// deterministic instead of dependent on whatever else the process is doing.
+let fixtureMemory = null;
+
 
 const clockGettime = new NativeFunction(
     Module.getExportByName('libc.so', 'clock_gettime'), 'int', ['int', 'pointer']);
@@ -260,6 +265,16 @@ function passesFilter(definition, args) {
   return true;
 }
 
+// A fixture records only the work it drives. When a fixture memory binding is
+// active, a call is recorded only if it happens on the fixture's thread. The
+// fixture calls the official entry itself through a NativeFunction, so there is
+// exactly one such thread; anything else is background noise.
+function passesFixture(definition) {
+  if (fixtureMemory === null) return true;
+  if (definition.fixtureThreadOnly === false) return true;
+  return Process.getCurrentThreadId() === fixtureMemory.tid;
+}
+
 function functionCallbacks(name, definition, moduleBase) {
   const callerReturns = definition.callerReturnRvas === undefined ? null
       : new Set(definition.callerReturnRvas.map(rva => moduleBase.add(rva).toString()));
@@ -276,6 +291,7 @@ function functionCallbacks(name, definition, moduleBase) {
         invocations.set(tid, stack);
       }
       if (!acceptingEntries
+          || !passesFixture(definition)
           || !passesFilter(definition, args)
           || (callerReturns !== null && !callerReturns.has(this.context.lr.toString()))) {
         stack.push({skip: true});
@@ -426,6 +442,26 @@ rpc.exports = {
     counters; // ensure defined
     acceptingEntries = true;
     return status();
+  },
+  bindfixturememory(binding) {
+    // A fixture allocates its own objects and calls the official entry itself.
+    // Binding that memory confines recording to the fixture's thread, so the
+    // trace contains only the work the fixture drove. The regions are validated
+    // as readable, never written.
+    if (fixtureMemory !== null) throw new Error('fixture memory already bound');
+    if (!Number.isSafeInteger(binding.tid) || binding.tid <= 0 || !binding.regions) {
+      throw new Error('invalid fixture memory binding');
+    }
+    for (const [name, region] of Object.entries(binding.regions)) {
+      if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)
+          || !Number.isSafeInteger(region.size) || region.size <= 0
+          || ptr(region.address).isNull()) {
+        throw new Error('invalid fixture region ' + name);
+      }
+      ptr(region.address).readByteArray(region.size);   // prove it is readable
+    }
+    fixtureMemory = binding;
+    return {tid: binding.tid, regions: Object.keys(binding.regions)};
   },
   flush() {
     flushAllBatches();
