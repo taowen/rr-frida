@@ -19,7 +19,7 @@ The adapter:
     made the same child calls in the same order with the same arguments.
 5.  Compares the parent's returned values and the observed child log.
 
-The recording is the oracle. Nothing here reads the official source.
+The recording is the oracle. Nothing here reads the oracle source.
 """
 
 from __future__ import annotations

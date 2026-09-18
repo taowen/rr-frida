@@ -1,13 +1,13 @@
 """Shared validation helpers for adapters.
 
-An *adapter* is the code that turns a validated recording into a native replay
-input and compares the result. Before it does either, it must confirm the
-recording is the one it claims to be. Those checks live here so every adapter
-uses the same primitives and no adapter can quietly relax them.
+An *adapter* is the code that validates a recording, encodes it into a native
+replay input, and compares the result. Before it does either, it must confirm
+the recording is the one it claims to be. Those checks live here so every
+adapter uses the same primitives and no adapter can quietly relax them.
 
 The rule that makes this layer meaningful:
 
-    Validate the recording against the official evidence, never against your
+    Validate the recording against the oracle's evidence, never against your
     own implementation's output.
 
 An adapter that changes a check so an existing recording passes is no longer

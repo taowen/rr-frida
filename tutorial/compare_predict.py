@@ -59,7 +59,7 @@ def elapsed_values(trace) -> list[float]:
         call 0: no previous reading -> elapsed 0 (it establishes the origin)
         call i: reading[i] - reading[i-1]
 
-    **The arithmetic is part of the contract.** The official code narrows the
+    **The arithmetic is part of the contract.** The oracle narrows the
     nanosecond difference to `float` *before* dividing and multiplying, so the
     elapsed value must be computed the same way. Computing it in double and
     narrowing at the end is off by one ULP on some intervals -- exactly the

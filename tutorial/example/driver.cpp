@@ -1,6 +1,6 @@
 // tutorial/example/driver.cpp
 //
-// A tiny Android process that runs the "official" shared library in a loop,
+// A tiny Android process that runs the oracle library in a loop,
 // so Frida has something to attach to without an APK or Gradle project.
 //
 // Build (AArch64 Android):

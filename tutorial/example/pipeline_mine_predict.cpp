@@ -2,7 +2,7 @@
 //
 // Your reimplementation of `pipeline_predict`.
 //
-// The official version reads CLOCK_MONOTONIC. Yours must not: a replay that
+// The oracle reads CLOCK_MONOTONIC. Yours must not: a replay that
 // reads the real clock produces a different answer every run, and the recorded
 // result would never match.
 //

@@ -1,27 +1,58 @@
 # rr-frida
 
-A record/replay oracle for native shared libraries.
+**Differential testing for native shared libraries.** Record what an official
+binary does, then check that your reimplementation does the same — byte for
+byte, on the device.
 
-You reimplemented a function from a stripped `.so`. It compiles and looks right.
-`rr-frida` records what the original actually did, then replays that recording
-against your code and compares the result **byte for byte** — so a one-ULP
-rounding difference or a swapped field is caught instead of shipped.
+## What this is, precisely
+
+This is not ordinary **snapshot testing**, though it shares its shape. In
+snapshot testing your own code writes the golden file, and the test proves you
+have not *changed*. Here the golden file comes from a **different
+implementation** — the original binary — and the test proves you are *equal to
+it*. That is **differential testing**, with a recording as the reference.
+
+Three properties follow, and they drive everything else in this repository:
+
+1. **The reference is an artifact, not a specification.** You record the
+   original while it runs, so the evidence is what it *did*, not what its
+   documentation or disassembly *claims*.
+2. **Comparison is on normalized business state.** The reference and your code
+   have different addresses, allocators, and thread internals. Addresses become
+   identities; platform internals are excluded.
+3. **The reference must be reproducible.** Anything ambient the original read —
+   wall-clock time, process state — has to be captured and replayed, or the
+   comparison is meaningless.
+
+## How it works
 
 ```text
-record  (Frida)   official library -> trace file (calls, args, returns, memory)
-validate          independent checks against the official evidence
-encode            trace -> typed input stream for your reimplementation
-replay  (native)  run your C++ on host or device
-compare           your output vs the recorded output, byte for byte
+record   (Frida)    oracle binary -> recording (calls, args, returns, memory)
+validate            check the recording against the oracle's evidence, and itself
+encode              recording -> typed input stream for your reimplementation
+replay   (native)   run your C++ on host or device
+compare             your output vs the recorded output, byte for byte
 ```
 
-## Why it works without ABI compatibility
+The central object is a **call contract**: for each hooked function, the
+arguments, the return value, selected memory before and after, and the ordered
+child calls. A recording stores contracts, not execution. That is why your code
+does not need to share the original's ABI, layout, or object model.
 
-The recording is a **contract**, not an execution trace. It stores which
-function ran, its arguments, its return value, selected memory before and after,
-and its ordered child calls. Replay runs *your* implementation with the recorded
-arguments and compares observable business state. Your code does not have to
-share the original's layout, calling convention, or object model.
+### Glossary
+
+| Term | Meaning |
+| --- | --- |
+| **oracle** | The reference implementation under test, or its recording. The thing you must match. |
+| **recording** | The file produced by the recorder. Its technical format is a **trace**; `trace` is used for the file format and its reader, `recording` for the evidence as a whole. |
+| **call contract** | What a recording stores for one function: inputs, output, memory, ordered children. |
+| **probe** | A declaration of what to observe: which function, which arguments, which memory. |
+| **probe set** | A named group of probes plus the module identity they belong to. |
+| **fixture** | A recording driven by a script that calls the oracle directly with chosen inputs, instead of waiting for a process to call it. |
+| **passive recording** | A recording made by observing a running process. Inherits the process's blind spots. |
+| **adapter** | Per-case code that validates a recording, encodes it into replay input, and compares the result. |
+| **normalization** | Turning addresses into identities and excluding platform state so two runs are comparable. |
+| **scope** | The declared coverage of a PASS. Every result prints one. |
 
 ## What the tutorial covers
 
@@ -32,20 +63,20 @@ watches a harder class walk past it:
 - **Case A** — a leaf function whose result differs in the last bit. Value
   comparison catches it, if the input can expose it.
 - **Case B** — the input you did not think to try. A passive recording inherits
-  the driver's blind spots, so a **fixture** takes control and calls the original
-  directly with chosen inputs. Its answers are re-checked against the trace.
+  the driver's blind spots, so a **fixture** takes control and calls the oracle
+  directly with chosen inputs. Its answers are re-checked against the recording.
 - **Case C** — the input you cannot see. `pipeline_predict` reads
   `CLOCK_MONOTONIC`, so it disagrees with itself between runs. The clock readings
   are captured and fed back, and the adapter's elapsed arithmetic has to match
-  the original's float boundary exactly.
+  the oracle's float boundary exactly.
 - **Case D** — a parent function whose code paths are distinguishable only by
   their **ordered child calls**. The method compares a call contract, normalizes
-  pointers to identities, and provides dependencies as checked shims.
+  pointers to identities, and supplies dependencies as checked shims.
 - **Case E** — the lock and global state held but not compared, and why that
   judgement is the hardest part of the method.
 
-Plus the part that is easy to skip: **a broken recording is worse than no
-recording**, and the four integrity checks that stop one being written.
+Plus the part that is easy to skip: **a broken recording is worse than none**,
+and the four integrity checks that stop one being written.
 
 Every step runs on a real device. Deliberately injected bugs are caught, then
 fixed.
@@ -84,15 +115,16 @@ and the failure the pipeline catches.
 
 | Command | Purpose |
 | --- | --- |
-| `python3 -m rrfrida.record` | Attach Frida, record a call contract |
-| `python3 -m rrfrida.inspect` | Print a trace as readable JSON |
+| `python3 -m rrfrida.record` | Attach Frida, make a passive recording |
+| `python3 -m rrfrida.fixture` | Run a fixture and record the oracle it calls |
+| `python3 -m rrfrida.inspect` | Print a recording as readable JSON |
 | `python3 -m rrfrida.run` | Run a registered case from `cases.json` |
 | `python3 tools/make_probes.py` | Generate probe declarations from a library |
 
-## Probe and probe-set files
+## Probes and probe sets
 
-`probes/*.json` describe what to observe; `probe-sets/*.json` name the module
-and pin its identity. See the module docstring in
+`probes/*.json` declare what to observe; `probe-sets/*.json` name the module and
+pin its identity. See the module docstring in
 [`rrfrida/probes.py`](rrfrida/probes.py) for the full field list, including the
 float/integer register distinction that trips people up on AArch64.
 

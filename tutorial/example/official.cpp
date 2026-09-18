@@ -1,6 +1,6 @@
 // tutorial/example/official.cpp
 //
-// The "official" implementation. In a real project this is a compiled shared
+// The oracle implementation. In a real project this is a compiled shared
 // library you cannot read; here we write it so the tutorial can be followed
 // end to end and so the answer is known.
 //

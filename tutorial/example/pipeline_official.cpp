@@ -1,6 +1,6 @@
 // tutorial/example/pipeline_official.cpp
 //
-// The "official" implementation of the pipeline. Built into libgeom.so.
+// The oracle implementation of the pipeline. Built into libpipeline.so.
 //
 // The helpers are hidden: not exported, no symbol in the dynamic table. A
 // reimplementation cannot call them, so it has to reproduce the parent's

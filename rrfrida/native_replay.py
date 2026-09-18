@@ -2,8 +2,8 @@
 
 A replay program reads a typed input stream on stdin, runs **your** C++
 implementation, and writes a result stream on stdout. This module owns only
-compilation, transport, and execution identity. It never loads the official
-shared library and never supplies expected output to the program.
+compilation, transport, and execution identity. It never loads the oracle and
+never supplies expected output to the program.
 
 The caller (an adapter) owns the input encoding and the comparison.
 

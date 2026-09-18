@@ -20,21 +20,60 @@ Everything runs on a real device. Nothing is a thought experiment.
 
 ---
 
+## What kind of testing this is
+
+This is **differential testing**: the reference is another implementation, not a
+specification. It looks like snapshot testing, and it is worth being precise
+about the difference, because the difference is where all the difficulty lives.
+
+| | snapshot testing | differential testing (here) |
+| --- | --- | --- |
+| Who writes the golden file | your own code | the **oracle** — the original binary |
+| What it proves | you have not *changed* | you are *equal to* the reference |
+| What is compared | one output value | a **call contract**: inputs, output, memory, ordered child calls |
+| Can the golden file be compared directly | yes | no — addresses and platform state must be **normalized** |
+| How the reference is obtained | incidental | deliberately, and it must be **reproducible** |
+
+Two consequences run through every case:
+
+- **The oracle is an artifact, not a specification.** You record what the
+  original *did*. Documentation and disassembly are hints; the recording is
+  evidence.
+- **You own the inputs.** A recording only proves what it covers. If you did not
+  choose what it covers, you do not know what it proves.
+
+### Glossary
+
+| Term | Meaning |
+| --- | --- |
+| **oracle** | The reference implementation, or its recording. The thing you must match. |
+| **recording** | The evidence produced by the recorder. Its file format is a **trace**. |
+| **call contract** | What a recording stores for one function: inputs, output, memory, ordered children. |
+| **probe** | A declaration of what to observe. |
+| **probe set** | A named group of probes plus the module identity they belong to. |
+| **fixture** | A recording driven by a script that calls the oracle directly with chosen inputs. |
+| **passive recording** | A recording made by observing a running process. Inherits its blind spots. |
+| **adapter** | Per-case code that validates a recording, encodes it, and compares the result. |
+| **normalization** | Turning addresses into identities, and excluding platform state, so two runs are comparable. |
+| **scope** | The declared coverage of a PASS. |
+
+---
+
 ## Cast of characters
 
 | Piece | What it is |
 | --- | --- |
-| `libgeom.so` | The original library. Two leaf functions, for warm-up. |
-| `libpipeline.so` | The original library with the parent function and its three private helpers. |
-| `driver.cpp` | A process that calls the library in a loop, so a passive recorder has something to watch. |
-| `fixtures/fixture_geom.js` | A fixture that calls the original directly, with inputs it chooses. |
-| `mine.cpp`, `pipeline_mine.cpp` | Your reimplementations. |
-| `probes/*.json` | Declarations of *what to watch*: which functions, which arguments, which memory. |
-| `rr-frida` | The recorder, the replayer, and the comparators. |
+| `libgeom.so` | The oracle for the warm-up cases. Two leaf functions. |
+| `libpipeline.so` | The oracle with the parent function, its three private helpers, and a time-dependent function. |
+| `driver.cpp` | A process that calls the oracle in a loop, so a **passive recording** has something to watch. |
+| `fixtures/fixture_geom.js` | A **fixture** that calls the oracle directly, with inputs it chooses. |
+| `mine.cpp`, `pipeline_mine.cpp` | Your reimplementations — the code under test. |
+| `probes/*.json` | **Probe** declarations: which functions, which arguments, which memory. |
+| `rr-frida` | The recorder, the replayer, and the **adapters**. |
 
-The rule under everything: **a recording stores a contract, not an execution.**
-It records what was called and what the world looked like, not the instructions.
-Neither side needs to resemble the other.
+The rule under everything: **a recording stores a call contract, not an
+execution.** It records what was called and what the world looked like, not the
+instructions. Neither side needs to resemble the other.
 
 ---
 
@@ -49,14 +88,14 @@ python3 tools/make_probes.py build/libgeom.so --nm "$NDK/llvm-nm.exe" ... \
 ```
 
 `geom_direction(float x, float y, float z, float* out)` normalizes a vector. Your
-version computes the length in `double` and narrows at the end. The original
+version computes the length in `double` and narrows at the end. The oracle
 computes it in `float`.
 
 You try `(1, 2, 2)`. It matches. A few more. They match. You ship.
 
 ## The evidence
 
-Record the original while a driver calls it:
+Record the oracle while a driver calls it:
 
 ```bash
 python3 -m rrfrida.record --serial <serial> --process geom-driver \
@@ -73,7 +112,7 @@ rrtrace.format.TraceError: direction[0] byte 8: actual 0xb3 != official 0xb2
 from a `float`/`double` rounding difference your inputs never exercised.
 
 This is the argument for the method in one byte: **a recording is evidence of
-what the original actually did, including the cases your intuition skipped.**
+what the oracle actually did, including the cases your intuition skipped.**
 
 ---
 
@@ -94,7 +133,7 @@ So the real question is not "did the recording catch it". It is:
 
 ## Take control
 
-A **fixture** calls the original directly. It allocates its own objects, calls
+A **fixture** calls the oracle directly. It allocates its own objects, calls
 the entry through a `NativeFunction` with inputs it writes, and reads the results
 out. Instead of hoping the process exercises a case, the fixture *asks*.
 
@@ -338,7 +377,7 @@ void apply_gain(float* values, int count, float gain) {
 
 `contract_child` verifies the kind, the arity, each argument, and that the parent
 does not call more children than the recording has. Then it returns the recorded
-result — so the arithmetic is yours, the *interaction* is the original's.
+result — so the arithmetic is yours, the *interaction* is the oracle's.
 
 ## The pointer problem
 
@@ -348,7 +387,7 @@ The first run fails strangely:
 pipeline replay: child 1 arg 0: actual 1 != recorded 0
 ```
 
-Argument zero is a buffer pointer. The official run had one address; yours has
+Argument zero is a buffer pointer. The oracle run had one address; yours has
 another. **Comparing addresses across processes is meaningless.**
 
 So pointers are recorded as **identity tokens**:
@@ -463,7 +502,7 @@ check above exists because a plausible-looking trace once lied.
 # What you have built
 
 1. **records** a contract from a running native library, passively or by fixture,
-2. **validates** the recording against the official evidence, and itself,
+2. **validates** the recording against the oracle's evidence, and itself,
 3. **replays** your C++ on the actual device,
 4. **compares** values, memory, call order, and lock ownership,
 5. **normalizes** pointers to identities so two runs can be compared at all,
@@ -484,8 +523,8 @@ It never needed ABI compatibility, a shared header, or the original source.
 - **Time is an input.** A function that reads a clock cannot be replayed until
   the readings are recorded and fed back.
 - **How you interpret the recording is part of the contract.** The float/double
-  boundary is everywhere, including in your adapter. Match the original's
-  arithmetic, not just its result.
+boundary is everywhere, including in your adapter. Match the oracle's
+arithmetic, not just its result.
 - **Pointers become identities.** An address is not evidence; a role is.
 - **Compare business state, exclude platform state.** Write down which is which,
   every time.
@@ -595,7 +634,7 @@ Recording a clock means three things, in order:
 1. **Capture the readings the target took.** Hook `clock_gettime`, keep only
    `CLOCK_MONOTONIC`, only successes, and only callers whose return address is
    inside the target module. Record `(seconds, nanos)` per call in order.
-2. **Interpret them exactly as the original did.** For `pipeline_predict` that
+2. **Interpret them exactly as the oracle did.** For `pipeline_predict` that
    means narrowing the nanosecond difference to `float` before dividing, and
    treating the first call as zero elapsed. Both rules are part of the contract.
 3. **Feed them back.** The reimplementation asks for the elapsed value; the
@@ -624,7 +663,7 @@ Two traps:
 | `required probe kind N never fired` | The recording proves nothing about that probe |
 | `fixture claim N disagrees` | The fixture misread memory; the trace is the truth |
 | `the recording has no clock readings` | Record a time-dependent function with `--capture-clock` |
-| A time-dependent result differs by one byte | The adapter's elapsed arithmetic is not the original's |
+| A time-dependent result differs by one byte | The adapter's elapsed arithmetic is not the oracle's |
 | `child call identity or arity differs` | Your parent's control flow diverges |
 | `child call argument differs` | Same calls, different arguments, or an un-normalized pointer |
 | First diff in an output field | Your arithmetic differs; the tool is working |

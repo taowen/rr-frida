@@ -1,8 +1,8 @@
-"""Run a fixture that calls the official entry point directly.
+"""Run a fixture that calls the oracle directly.
 
 Passive recording waits for a real pipeline to call the function, which means
 you record whatever the process happens to do. A **fixture** takes control: it
-allocates the objects it needs, calls the official entry through a
+allocates the objects it needs, calls the oracle's entry point through a
 `NativeFunction` with inputs it chooses, and reads the results out. That turns
 recording from "watch what happens" into "ask this specific question".
 
@@ -14,12 +14,12 @@ The fixture is a JavaScript module exporting::
 
     rpc.exports = {
       setup() { return {tid, regions: {name: {address, size}}}; },
-      run()   { /* call the official entry, return a result object */ },
+      run()   { /* call the oracle entry point, return a result object */ },
     }
 
 `setup` allocates memory and reports the regions it owns. The agent binds them
 so recording is confined to the fixture's thread. `run` performs the calls; the
-probes already installed on the official entry capture each one.
+probes already installed on the oracle entry capture each one.
 
 The fixture's returned object is a **claim**, not evidence. It is stored as
 `fixture_result` and can be checked against the captured calls by a validator;

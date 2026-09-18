@@ -8,7 +8,7 @@ Steps, in the order the design requires:
 
 1.  Validate the recording independently (probe set, module identity, call
     shape, argument ABI, snapshot sizes). This layer is checked against the
-    *official* evidence and must not be relaxed to make an implementation pass.
+    oracle's evidence and must not be relaxed to make an implementation pass.
 2.  Encode the validated recording into the replay program's input stream.
 3.  Run the replay program. It executes ``mine.cpp`` and writes its results.
 4.  Compare the reimplementation's output to the recorded output byte for byte.
