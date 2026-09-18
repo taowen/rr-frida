@@ -1,0 +1,8 @@
+{
+  "geom": {
+    "probe_set": "tutorial/example/probe-set.json",
+    "probes_dir": "probes",
+    "compare": "tutorial/compare_geom.py",
+    "duration": 2
+  }
+}

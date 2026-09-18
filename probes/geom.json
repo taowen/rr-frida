@@ -1,0 +1,62 @@
+{
+  "geom_scale": {
+    "kind": 100,
+    "type": "function",
+    "rva": "0x45f8",
+    "expected": "02102e1e0208011f",
+    "snapshots": [
+      {
+        "phase": "enter",
+        "register": "s0"
+      },
+      {
+        "phase": "enter",
+        "register": "s1"
+      },
+      {
+        "phase": "enter",
+        "source": "arg0",
+        "size": 8
+      },
+      {
+        "phase": "leave",
+        "register": "s0"
+      },
+      {
+        "phase": "leave",
+        "source": "arg0",
+        "size": 8
+      }
+    ]
+  },
+  "geom_direction": {
+    "kind": 200,
+    "type": "function",
+    "rva": "0x4610",
+    "expected": "2308211e04e4002f",
+    "snapshots": [
+      {
+        "phase": "enter",
+        "register": "s0"
+      },
+      {
+        "phase": "enter",
+        "register": "s1"
+      },
+      {
+        "phase": "enter",
+        "register": "s2"
+      },
+      {
+        "phase": "enter",
+        "source": "arg0",
+        "size": 8
+      },
+      {
+        "phase": "leave",
+        "source": "arg0",
+        "size": 12
+      }
+    ]
+  }
+}

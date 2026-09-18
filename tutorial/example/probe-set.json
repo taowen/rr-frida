@@ -1,0 +1,9 @@
+{
+  "module": "libgeom.so",
+  "sha256": "3cfa1a17125a571d6857e0767c97e644d658c88df31b08ef7e476d0ad6f8cd34",
+  "required": [
+    "geom_scale",
+    "geom_direction"
+  ],
+  "optional": []
+}
