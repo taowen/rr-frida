@@ -84,8 +84,15 @@ def run_fixture(args: argparse.Namespace) -> dict:
     setup = script.exports_sync.setup()
     regions = setup.get("regions") or {}
     bound = script.exports_sync.bindfixturememory({"tid": setup["tid"], "regions": regions})
+    # Capture clock readings the target makes, so a time-dependent function can
+    # be reproduced. This only observes CLOCK_MONOTONIC calls made from the
+    # target module; it never changes a value.
+    if args.capture_clock:
+        script.exports_sync.enableclockcapture()
     script.exports_sync.beginobservation()
     result = script.exports_sync.run()
+    clock_readings = (script.exports_sync.clockreadings()
+                      if args.capture_clock else [])
     summary = script.exports_sync.finishobservation()
     if writer.error:
         raise RecorderError(f"agent error during fixture: {writer.error}")
@@ -102,6 +109,7 @@ def run_fixture(args: argparse.Namespace) -> dict:
         "process": {"name": args.process, "pid": pid},
         "fixture_memory": {"tid": setup["tid"], "regions": regions},
         "fixture_result": result,
+        "clock_readings": clock_readings,
     }
     manifest = writer.finish(Path(args.output), metadata)
     if summary.get("drop_count"):
@@ -115,6 +123,7 @@ def run_fixture(args: argparse.Namespace) -> dict:
         "module": module["name"],
         "module_sha256": module.get("sha256"),
         "fixture_keys": sorted(result.keys()) if isinstance(result, dict) else [],
+        "clock_readings": len(clock_readings),
     }
 
 
@@ -130,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pid", type=int)
     parser.add_argument("--session-id")
     parser.add_argument("--install-timeout", type=float, default=10.0)
+    parser.add_argument("--capture-clock", action="store_true",
+                        help="record CLOCK_MONOTONIC readings made by the target module")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     if not args.process and not args.pid:

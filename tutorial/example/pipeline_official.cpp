@@ -120,3 +120,54 @@ extern "C" int pipeline_process(int config, const float* input, int count, float
     pthread_mutex_unlock(&shared.mutex);
     return written;
 }
+
+namespace {
+
+// Reads CLOCK_MONOTONIC and returns it in nanoseconds.
+//
+// This is the point that makes time an input: the result depends on when the
+// function ran, which a recording cannot reproduce unless the readings are
+// captured too.
+std::int64_t monotonic_now_ns() {
+    timespec now{};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    return static_cast<std::int64_t>(now.tv_sec) * 1000000000LL
+           + static_cast<std::int64_t>(now.tv_nsec);
+}
+
+// The previous call's timestamp, and the magnitude of the previous input. The
+// delta between calls is what the prediction is built on.
+std::int64_t g_previous_ns = 0;
+
+} // namespace
+
+extern "C" float pipeline_predict(const float* input, int count, float* out) {
+    if (input == nullptr || out == nullptr || count <= 0) {
+        return -1.0f;
+    }
+    const std::int64_t now_ns = monotonic_now_ns();
+    float magnitude = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        const float value = input[i] < 0.0f ? -input[i] : input[i];
+        if (value > magnitude) {
+            magnitude = value;
+        }
+    }
+
+    if (g_previous_ns == 0) {
+        // First call: no previous timestamp, so no delta. Establish the origin.
+        g_previous_ns = now_ns;
+        out[0] = 0.0f;
+        out[1] = magnitude;
+        return 0.0f;
+    }
+
+    const float elapsed_ms = static_cast<float>(now_ns - g_previous_ns) / 1000000.0f;
+    g_previous_ns = now_ns;
+    const float delta = elapsed_ms * magnitude;
+    out[0] = delta;
+    out[1] = magnitude;
+    return delta;
+}

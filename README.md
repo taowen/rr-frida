@@ -25,7 +25,7 @@ share the original's layout, calling convention, or object model.
 
 ## What the tutorial covers
 
-[`tutorial/README.md`](tutorial/README.md) is a four-case investigation, not a
+[`tutorial/README.md`](tutorial/README.md) is a five-case investigation, not a
 feature tour. Each case builds a method that catches one class of failure, then
 watches a harder class walk past it:
 
@@ -34,10 +34,14 @@ watches a harder class walk past it:
 - **Case B** — the input you did not think to try. A passive recording inherits
   the driver's blind spots, so a **fixture** takes control and calls the original
   directly with chosen inputs. Its answers are re-checked against the trace.
-- **Case C** — a parent function whose code paths are distinguishable only by
-  their **ordered child calls**. The method has to compare a call contract,
-  normalize pointers to identities, and provide dependencies as checked shims.
-- **Case D** — the lock and global state held but not compared, and why that
+- **Case C** — the input you cannot see. `pipeline_predict` reads
+  `CLOCK_MONOTONIC`, so it disagrees with itself between runs. The clock readings
+  are captured and fed back, and the adapter's elapsed arithmetic has to match
+  the original's float boundary exactly.
+- **Case D** — a parent function whose code paths are distinguishable only by
+  their **ordered child calls**. The method compares a call contract, normalizes
+  pointers to identities, and provides dependencies as checked shims.
+- **Case E** — the lock and global state held but not compared, and why that
   judgement is the hardest part of the method.
 
 Plus the part that is easy to skip: **a broken recording is worse than no

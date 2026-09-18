@@ -2,7 +2,7 @@
   "pipeline_process": {
     "kind": 300,
     "type": "function",
-    "rva": "0x49cc",
+    "rva": "0x4a74",
     "expected": "ff4305d1e923106d",
     "snapshots": [
       {
@@ -44,7 +44,7 @@
   "pipeline_apply_gain": {
     "kind": 310,
     "type": "function",
-    "rva": "0x4810",
+    "rva": "0x48b8",
     "expected": "3f0400712b030054",
     "snapshots": [
       {
@@ -64,7 +64,7 @@
   "pipeline_normalize": {
     "kind": 320,
     "type": "function",
-    "rva": "0x487c",
+    "rva": "0x4924",
     "expected": "00e4002f3f040071",
     "snapshots": [
       {
@@ -84,7 +84,7 @@
   "pipeline_summarize": {
     "kind": 330,
     "type": "function",
-    "rva": "0x4918",
+    "rva": "0x49c0",
     "expected": "3f040071eb000054",
     "snapshots": [
       {
@@ -102,6 +102,44 @@
       {
         "phase": "enter",
         "register": "x3"
+      }
+    ]
+  },
+  "pipeline_predict": {
+    "kind": 340,
+    "type": "function",
+    "rva": "0x4b6c",
+    "expected": "00103e1e3f040071",
+    "snapshots": [
+      {
+        "phase": "enter",
+        "register": "x0"
+      },
+      {
+        "phase": "enter",
+        "register": "x1"
+      },
+      {
+        "phase": "enter",
+        "register": "x2"
+      },
+      {
+        "phase": "enter",
+        "source": "arg0",
+        "size_arg": 1,
+        "multiplier": 4,
+        "max": 256,
+        "optional": true
+      },
+      {
+        "phase": "leave",
+        "register": "s0"
+      },
+      {
+        "phase": "leave",
+        "source": "arg2",
+        "size": 8,
+        "optional": true
       }
     ]
   }

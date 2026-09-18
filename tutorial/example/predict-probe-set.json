@@ -2,12 +2,7 @@
   "module": "libpipeline.so",
   "sha256": "b9788f9363279a5ae353f57a6a873f80b055dc73544ee59edddf16ee0996e0b6",
   "required": [
-    "pipeline_process"
-  ],
-  "optional": [
-    "pipeline_apply_gain",
-    "pipeline_normalize",
-    "pipeline_summarize",
     "pipeline_predict"
-  ]
+  ],
+  "optional": []
 }

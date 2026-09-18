@@ -51,6 +51,25 @@ $hash = (Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash.ToLower()
 Write-Output "library: $library"
 Write-Output "driver:  $driver"
 Write-Output "sha256:  $hash"
+
+# The pipeline library: a parent with private helpers, plus a time-dependent
+# function. Built the same way.
+$pipeline = Join-Path $build "libpipeline.so"
+$pipelineDriver = Join-Path $build "pipeline-driver"
+
+& $clangxx @("--target=aarch64-linux-android29", "-O2", "-shared", "-fPIC",
+             "-o", $pipeline, (Join-Path $example "pipeline_official.cpp"))
+if ($LASTEXITCODE -ne 0) { throw "pipeline library build failed" }
+
+& $clangxx @("--target=aarch64-linux-android29", "-O2", "-static-libstdc++",
+             "-Wl,-rpath,/data/local/tmp", "-L$build", "-lpipeline",
+             "-o", $pipelineDriver, (Join-Path $example "pipeline_driver.cpp"))
+if ($LASTEXITCODE -ne 0) { throw "pipeline driver build failed" }
+
+$pipelineHash = (Get-FileHash -LiteralPath $pipeline -Algorithm SHA256).Hash.ToLower()
+Write-Output "pipeline:        $pipeline"
+Write-Output "pipeline-driver: $pipelineDriver"
+Write-Output "pipeline sha256: $pipelineHash"
 Write-Output ""
-Write-Output "Pin this hash in tutorial/example/probe-set.json, then generate probes with:"
+Write-Output "Pin each hash in its probe-set file, then generate probes with:"
 Write-Output "  python3 tools/make_probes.py build/libgeom.so --nm `"$nm`" ..."

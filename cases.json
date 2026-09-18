@@ -17,5 +17,13 @@
     "compare": "tutorial/compare_fixture.py",
     "fixture": "tutorial/example/fixture_geom.js",
     "kind": "fixture"
+  },
+  "predict": {
+    "probe_set": "tutorial/example/predict-probe-set.json",
+    "probes_dir": "probes",
+    "compare": "tutorial/compare_predict.py",
+    "fixture": "tutorial/example/fixture_predict.js",
+    "kind": "fixture",
+    "capture_clock": true
   }
 }

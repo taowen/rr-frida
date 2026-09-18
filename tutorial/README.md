@@ -11,7 +11,7 @@ You write it. It compiles. It returns the right numbers on every input you try.
 
 And it is wrong.
 
-This tutorial is the hunt for that bug, and for the three more waiting behind it.
+This tutorial is the hunt for that bug, and for the four more waiting behind it.
 Each time you build a method that catches one class of failure, a harder class
 walks past it. By the end you have a recorder, a replayer, and — the part that
 actually matters — a way of knowing what your evidence *covers*.
@@ -186,7 +186,115 @@ only caught it by luck. The fixture catches it by design.
 
 ---
 
-# Case C: the bug that is not in the numbers
+# Case C: the input you cannot see
+
+## A function that disagrees with itself
+
+`pipeline_predict` reads `CLOCK_MONOTONIC` and returns the elapsed milliseconds
+since its previous call, scaled by the input magnitude. Call it twice with the
+same arguments and you get two different answers.
+
+So record it the usual way and replay it:
+
+```
+record:  delta = 0        (first call, establishes the origin)
+         delta = 130.94   (30 ms later)
+         delta = 5.55     (1.3 ms later)
+```
+
+Your reimplementation does the same arithmetic. But it reads the clock too — and
+by the time it runs, the machine is in a different state. The numbers are
+different every time. The comparison can never pass, or worse, passes once by
+coincidence and fails in production.
+
+**A function that depends on ambient state cannot be replayed until that state
+becomes part of the recording.**
+
+## What the recorder captures
+
+The agent hooks `clock_gettime` while the fixture runs and records every reading
+the target module made:
+
+```js
+Interceptor.attach(clockGettime, {
+  onLeave(retval) {
+    if (this.clockId !== 1) return;                 // CLOCK_MONOTONIC only
+    if (retval.toInt32() !== 0) return;
+    const module = Process.findModuleByAddress(this.caller);
+    if (module === null || module.name !== config.probeSet.module) return;
+    readings.push({seconds: ..., nanos: ...});
+  },
+});
+```
+
+Three filters, each load-bearing:
+
+- **Only `CLOCK_MONOTONIC`.** A recording has no business capturing the
+  process's whole relationship with time.
+- **Only successes.** A failed call leaves the destination untouched; recording
+  it would invent a reading that never happened.
+- **Only calls from the target module.** This is the one that matters most.
+  Virtualizing the clock for the *whole process* hangs the host: the harness and
+  the Android UI share the address space and rely on real timeouts. The real
+  project documents exactly this — resolve the caller's module and leave
+  everything else on real time.
+
+The readings land in the trace as `clock_readings`, alongside `fixture_result`.
+
+## What the adapter does with them
+
+The replay must feed the function the time it originally saw. But "the elapsed
+value" is not simply the difference between two readings — **the arithmetic is
+part of the contract**:
+
+```c
+// official
+float elapsed = (float)(now_ns - previous_ns) / 1000000.0f;
+float delta   = elapsed * magnitude;
+```
+
+The nanosecond difference is narrowed to `float` **before** the division. Do the
+same math in double and narrow at the end, and you are off by one ULP:
+
+```
+C path:      43 02 ef 86
+double path: 43 02 ef 85     <- one byte
+```
+
+The adapter computes elapsed the way C does:
+
+```python
+values.append(_f32(_f32(float(difference_ns)) / _f32(1000000.0)))
+```
+
+> This is Case A's lesson returning in a new place. The float/double boundary is
+> everywhere, including in your own adapter. The recording is the authority; the
+> adapter's job is to interpret it exactly, not approximately.
+
+## The replay
+
+The reimplementation never reads a clock. It asks for the elapsed value:
+
+```cpp
+const float elapsed_ms = tutorial_helpers::predict_elapsed_ms();
+```
+
+The replay supplies it from the recording, one value per call. Run it:
+
+```json
+{ "result": "PASS", "cases": 3, "elapsed_ms": [0.0, 31.29, 1.35], "bytes": 36 }
+```
+
+The function is now reproducible. Its output depends only on recorded inputs:
+the samples, and the time.
+
+> The origin rule is part of the contract too: the first call has no previous
+> reading, so its elapsed is zero. Getting that wrong shifts every subsequent
+> value. Time is not special-cased — it is one more input to pin down.
+
+---
+
+# Case D: the bug that is not in the numbers
 
 Values are comfortable. Real targets are not.
 
@@ -275,7 +383,7 @@ recording passes twelve cases on AArch64.
 
 ---
 
-# Case D: the things the recording deliberately does not compare
+# Case E: the things the recording deliberately does not compare
 
 Every PASS prints a `scope`:
 
@@ -359,7 +467,8 @@ check above exists because a plausible-looking trace once lied.
 3. **replays** your C++ on the actual device,
 4. **compares** values, memory, call order, and lock ownership,
 5. **normalizes** pointers to identities so two runs can be compared at all,
-6. **states its scope**, so a PASS cannot be mistaken for more than it is.
+6. **captures the clock**, so a time-dependent function becomes reproducible,
+7. **states its scope**, so a PASS cannot be mistaken for more than it is.
 
 It never needed ABI compatibility, a shared header, or the original source.
 
@@ -372,6 +481,11 @@ It never needed ABI compatibility, a shared header, or the original source.
 - **Own the inputs.** A passive recording inherits its author's blind spots; a
   fixture chooses what to ask.
 - **A fixture's answer is a claim.** Re-derive it from the trace or discard it.
+- **Time is an input.** A function that reads a clock cannot be replayed until
+  the readings are recorded and fed back.
+- **How you interpret the recording is part of the contract.** The float/double
+  boundary is everywhere, including in your adapter. Match the original's
+  arithmetic, not just its result.
 - **Pointers become identities.** An address is not evidence; a role is.
 - **Compare business state, exclude platform state.** Write down which is which,
   every time.
@@ -406,10 +520,26 @@ python3 -m rrfrida.fixture --serial <serial> --process geom-driver \
     --probe-set tutorial/example/probe-set.json --probes-dir probes \
     --fixture tutorial/example/fixture_geom.js --output build/fixture.bin
 python3 tutorial/compare_fixture.py build/fixture.bin --serial <serial> --compiler "$NDK/clang++.exe"
+
+# 5. Time-dependent function, with the logical clock recorded
+adb push build/libpipeline.so build/pipeline-driver /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/pipeline-driver
+adb shell "nohup /data/local/tmp/pipeline-driver >/dev/null 2>&1 &"
+python3 -m rrfrida.fixture --serial <serial> --process pipeline-driver \
+    --probe-set tutorial/example/predict-probe-set.json --probes-dir probes \
+    --fixture tutorial/example/fixture_predict.js --capture-clock \
+    --output build/predict.bin
+python3 tutorial/compare_predict.py build/predict.bin --serial <serial> --compiler "$NDK/clang++.exe"
 ```
 
 The parent-contract pipeline case is registered in `cases.json`; run it with
 `python3 -m rrfrida.run pipeline --trace build/pipeline.bin ...`.
+
+> Restart the target process between recordings of a stateful function. Static
+> state persists across fixture runs in the same process, so a second recording
+> in a live process starts from the first one's leftovers — as the first attempt
+> at `pipeline_predict` showed, returning a non-zero delta where the fresh
+> process returned zero.
 
 ---
 
@@ -458,6 +588,29 @@ failed capture records null instead of aborting the agent:
 The reader reports `captured: false`, and the adapter decides whether that is
 acceptable. A zero-filled failed read is never treated as observed memory.
 
+## The logical clock
+
+Recording a clock means three things, in order:
+
+1. **Capture the readings the target took.** Hook `clock_gettime`, keep only
+   `CLOCK_MONOTONIC`, only successes, and only callers whose return address is
+   inside the target module. Record `(seconds, nanos)` per call in order.
+2. **Interpret them exactly as the original did.** For `pipeline_predict` that
+   means narrowing the nanosecond difference to `float` before dividing, and
+   treating the first call as zero elapsed. Both rules are part of the contract.
+3. **Feed them back.** The reimplementation asks for the elapsed value; the
+   replay supplies it from the recording. The reimplementation never reads a
+   clock.
+
+Two traps:
+
+- Virtualizing the clock for the whole process hangs the host. The harness and
+  the Android UI share the address space and depend on real timeouts. Filter by
+  caller module.
+- A stateful function carries state across recordings in a live process. If the
+  first recorded call does not return what a fresh process would, restart the
+  target before recording.
+
 ## Common failures
 
 | Symptom | Cause |
@@ -470,6 +623,8 @@ acceptable. A zero-filled failed read is never treated as observed memory.
 | `thread 0x... sequence N, expected M` | An event was dropped inside a batch |
 | `required probe kind N never fired` | The recording proves nothing about that probe |
 | `fixture claim N disagrees` | The fixture misread memory; the trace is the truth |
+| `the recording has no clock readings` | Record a time-dependent function with `--capture-clock` |
+| A time-dependent result differs by one byte | The adapter's elapsed arithmetic is not the original's |
 | `child call identity or arity differs` | Your parent's control flow diverges |
 | `child call argument differs` | Same calls, different arguments, or an un-normalized pointer |
 | First diff in an output field | Your arithmetic differs; the tool is working |

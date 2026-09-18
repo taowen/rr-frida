@@ -50,6 +50,53 @@ let fixtureMemory = null;
 const clockGettime = new NativeFunction(
     Module.getExportByName('libc.so', 'clock_gettime'), 'int', ['int', 'pointer']);
 
+// Clock capture.
+//
+// A function that reads the clock produces a different result every time it
+// runs, so a recording of it is worthless unless the readings are captured too.
+// This hook records each CLOCK_MONOTONIC reading *made by the target module*,
+// in order. It does not change any value; it only observes.
+//
+// Two filters matter:
+//
+//   * Only CLOCK_MONOTONIC. Other clock ids are left alone; a recording has no
+//     business capturing the process's whole time behaviour.
+//   * Only calls whose return address is inside the target module. Virtualizing
+//     the whole process's clock would hang the harness and the Android UI, which
+//     share the address space and rely on real timeouts. This is the same
+//     mistake the real project documents: hook the target, not the world.
+let clockCapture = null;
+
+function enableClockCapture() {
+  if (clockCapture !== null) return;
+  const readings = [];
+  clockCapture = {readings, listener: Interceptor.attach(clockGettime, {
+    onEnter(args) {
+      this.clockId = args[0].toInt32();
+      this.destination = args[1];
+      this.caller = this.returnAddress;
+    },
+    onLeave(retval) {
+      if (clockCapture === null) return;
+      if (this.clockId !== 1) return;                       // CLOCK_MONOTONIC only
+      if (retval.toInt32() !== 0) return;
+      if (this.caller === null) return;
+      const module = Process.findModuleByAddress(this.caller);
+      if (module === null || module.name !== config.probeSet.module) return;
+      readings.push({
+        seconds: this.destination.readU64().toNumber(),
+        nanos: this.destination.add(8).readU64().toNumber(),
+      });
+    },
+  })};
+}
+
+function disableClockCapture() {
+  if (clockCapture === null) return;
+  clockCapture.listener.detach();
+  clockCapture = null;
+}
+
 function currentMonotonicNs(tid) {
   let storage = timeBuffers.get(tid);
   if (storage === undefined) {
@@ -466,6 +513,13 @@ rpc.exports = {
   flush() {
     flushAllBatches();
     return status();
+  },
+  enableclockcapture() {
+    enableClockCapture();
+    return {readings: clockCapture ? clockCapture.readings.length : 0};
+  },
+  clockreadings() {
+    return clockCapture === null ? [] : clockCapture.readings;
   },
   async finishobservation() {
     // Stop accepting new entries, then let in-flight calls return.
